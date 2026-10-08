@@ -10,6 +10,7 @@ import { getQwenHeaders } from "../services/playwright.js";
 import { config } from "../core/config.js";
 import { cache } from "../cache/memory-cache.js";
 import crypto from "crypto";
+import { downloadAttachment, AttachmentDownloadError } from "../services/attachment-download.js";
 
 interface STSResponse {
   success: boolean;
@@ -612,116 +613,124 @@ export async function processImagesForQwen(
     file_url?: { url: string };
   }>,
   headers: Record<string, string>,
+  options: { signal?: AbortSignal; budget?: { remainingBytes: number } } = {},
 ): Promise<{ text: string; files: QwenFileEntry[]; docText: string }> {
   const textParts: string[] = [];
   const files: QwenFileEntry[] = [];
   const docTexts: string[] = [];
-
+  const budget = options.budget ?? { remainingBytes: config.attachmentDownload.maxBytes };
+  if (!Number.isSafeInteger(budget.remainingBytes) || budget.remainingBytes < 0) throw new AttachmentDownloadError('Invalid attachment byte budget');
+  budget.remainingBytes = Math.min(budget.remainingBytes, config.attachmentDownload.maxBytes);
+  const attachmentTypes = ['image_url', 'video_url', 'audio_url', 'file_url'];
+  if (content.filter(part => attachmentTypes.includes(part.type)).length > config.attachmentDownload.maxFiles) {
+    throw new AttachmentDownloadError('Too many attachments', 400, 'attachment_limit');
+  }
+  const checkCancellation = () => {
+    if (options.signal?.aborted) throw new AttachmentDownloadError('Attachment processing cancelled', 400, 'attachment_cancelled');
+  };
   for (const part of content) {
     if (part.type === "text" && part.text) {
       textParts.push(part.text);
-    } else if (
-      (part.type === "image_url" && part.image_url?.url) ||
-      (part.type === "video_url" && part.video_url?.url) ||
-      (part.type === "audio_url" && part.audio_url?.url) ||
-      (part.type === "file_url" && part.file_url?.url)
-    ) {
-      const mediaUrl =
-        part.type === "video_url"
-          ? part.video_url!.url
-          : part.type === "audio_url"
-            ? part.audio_url!.url
-            : part.type === "file_url"
-              ? part.file_url!.url
-              : part.image_url!.url;
-      let fileUrl = "";
-      let filename = "";
-      let fileSize = 0;
-      let fileId = "";
-      let fileBuffer: Buffer | null = null;
+    } else if (attachmentTypes.includes(part.type)) {
+      const mediaUrl = part.type === 'video_url' ? part.video_url?.url : part.type === 'audio_url' ? part.audio_url?.url
+        : part.type === 'file_url' ? part.file_url?.url : part.image_url?.url;
+      if (typeof mediaUrl !== 'string' || !mediaUrl) throw new AttachmentDownloadError('Attachment URL is required');
+      checkCancellation();
+      let fileUrl: string;
+      let filename: string;
+      let fileSize: number;
+      let fileId: string;
+      let fileBuffer: Buffer;
 
-      if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-        try {
-          const downloadRes = await fetch(mediaUrl);
-          if (!downloadRes.ok) {
-            console.error(`[Upload] Failed to download media: ${downloadRes.status} ${mediaUrl}`);
-            continue;
-          }
-          const buffer = Buffer.from(await downloadRes.arrayBuffer());
-          fileBuffer = buffer;
-          fileSize = buffer.length;
-          filename = mediaUrl.split("/").pop()?.split("?")[0] || "file.bin";
-          if (!filename.includes(".")) {
-            const mime = downloadRes.headers.get("content-type") || "";
-            const mimeExt: Record<string, string> = {
-              "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
-              "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm",
-              "audio/mpeg": "mp3", "audio/wav": "wav", "audio/ogg": "ogg",
-              "audio/flac": "flac", "audio/mp4": "m4a", "audio/aac": "aac",
-              "application/pdf": "pdf",
-            };
-            const ext = mimeExt[mime] || "bin";
-            filename = `${filename}.${ext}`;
-          }
-          const typeInfo = detectFileType(filename);
-          const stsData = await getSTSToken(
-            filename,
-            fileSize,
-            typeInfo.qwenFileType,
-            headers,
-          );
-          fileUrl = await uploadToOSS(buffer, stsData, filename);
-          fileId = stsData.file_id;
-        } catch (err: any) {
-          console.error("[Upload] Failed to download/re-upload HTTP media:", err.message);
-          continue;
-        }
-      } else if (mediaUrl.startsWith("data:")) {
-        try {
-          // Detect type from data URI
-          const dataMime = mediaUrl.match(/^data:([^;]+)/)?.[1] || "";
-          const isVideoData = dataMime.startsWith("video/");
-          const isAudioData = dataMime.startsWith("audio/");
-          const extFromMime: Record<string, string> = {
-            "video/mp4": "mp4",
-            "video/webm": "webm",
-            "video/quicktime": "mov",
-            "audio/mpeg": "mp3",
-            "audio/wav": "wav",
-            "audio/ogg": "ogg",
-            "audio/flac": "flac",
-            "audio/mp4": "m4a",
-            "audio/aac": "aac",
-            "image/png": "png",
-            "image/jpeg": "jpg",
-            "image/gif": "gif",
-            "image/webp": "webp",
+      if (/^https?:/i.test(mediaUrl)) {
+        const downloaded = await downloadAttachment(mediaUrl, { signal: options.signal, maxBytes: budget.remainingBytes });
+        const buffer = downloaded.buffer;
+        budget.remainingBytes -= buffer.length;
+        fileBuffer = buffer;
+        fileSize = buffer.length;
+        filename = downloaded.url.pathname.split('/').pop() || 'file.bin';
+        if (!filename.includes(".")) {
+          const mime = downloaded.contentType.split(";")[0].trim().toLowerCase();
+          const mimeExt: Record<string, string> = {
+            "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif",
+            "image/webp": "webp", "video/mp4": "mp4", "video/webm": "webm",
+            "audio/mpeg": "mp3", "audio/wav": "wav", "audio/ogg": "ogg",
+            "audio/flac": "flac", "audio/mp4": "m4a", "audio/aac": "aac",
             "application/pdf": "pdf",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
           };
-          const detectedExt =
-            extFromMime[dataMime] ||
-            (isVideoData ? "mp4" : isAudioData ? "mp3" : "png");
-          const base64Data = mediaUrl.split(",")[1];
-          const buffer = Buffer.from(base64Data, "base64");
-          fileBuffer = buffer;
-          filename = `${isVideoData ? "video" : isAudioData ? "audio" : "file"}_${Date.now()}.${detectedExt}`;
-          fileSize = buffer.length;
-          const typeInfo = detectFileType(filename);
-          const stsData = await getSTSToken(
-            filename,
-            fileSize,
-            typeInfo.qwenFileType,
-            headers,
-          );
-          fileUrl = await uploadToOSS(buffer, stsData, filename);
-          fileId = stsData.file_id;
-        } catch (err: any) {
-          console.error("[Upload] Failed to upload media:", err.message);
-          continue;
+          const ext = mimeExt[mime] || "bin";
+          filename = `${filename}.${ext}`;
         }
+        const typeInfo = detectFileType(filename);
+        const stsData = await getSTSToken(
+          filename,
+          fileSize,
+          typeInfo.qwenFileType,
+          headers,
+        );
+        checkCancellation();
+        fileUrl = await uploadToOSS(buffer, stsData, filename);
+        fileId = stsData.file_id;
+      } else if (/^data:/i.test(mediaUrl)) {
+        // Detect type from data URI
+        const data = mediaUrl.match(/^data:([^,]*);base64,([a-z0-9+/\r\n\t ]*={0,2})$/i);
+        if (!data) throw new AttachmentDownloadError('Invalid base64 attachment URL');
+        const dataMime = data[1].split(';')[0].toLowerCase();
+        const isVideoData = dataMime.startsWith("video/");
+        const isAudioData = dataMime.startsWith("audio/");
+        const extFromMime: Record<string, string> = {
+          "video/mp4": "mp4",
+          "video/webm": "webm",
+          "video/quicktime": "mov",
+          "audio/mpeg": "mp3",
+          "audio/wav": "wav",
+          "audio/ogg": "ogg",
+          "audio/flac": "flac",
+          "audio/mp4": "m4a",
+          "audio/aac": "aac",
+          "image/png": "png",
+          "image/jpeg": "jpg",
+          "image/gif": "gif",
+          "image/webp": "webp",
+          "application/pdf": "pdf",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+        };
+        const detectedExt =
+          extFromMime[dataMime] ||
+          (isVideoData ? "mp4" : isAudioData ? "mp3" : "png");
+        const base64Data = data[2].replace(/[\r\n\t ]/g, '');
+        const unpaddedLength = base64Data.replace(/=+$/, '').length;
+        if (unpaddedLength % 4 === 1 || (base64Data.includes('=') && base64Data.length % 4 !== 0)) {
+          throw new AttachmentDownloadError('Invalid base64 attachment URL');
+        }
+        if (Math.floor(unpaddedLength * 3 / 4) > budget.remainingBytes) {
+          throw new AttachmentDownloadError('Attachments exceed the byte limit', 413, 'attachment_too_large');
+        }
+        const buffer = Buffer.from(base64Data, "base64");
+        if (buffer.toString('base64').replace(/=+$/, '') !== base64Data.replace(/=+$/, '')) {
+          throw new AttachmentDownloadError('Invalid base64 attachment URL');
+        }
+        if (buffer.length > budget.remainingBytes) throw new AttachmentDownloadError('Attachments exceed the byte limit', 413, 'attachment_too_large');
+        budget.remainingBytes -= buffer.length;
+        fileBuffer = buffer;
+        filename = `${isVideoData ? "video" : isAudioData ? "audio" : "file"}_${Date.now()}.${detectedExt}`;
+        fileSize = buffer.length;
+        const typeInfo = detectFileType(filename);
+        const stsData = await getSTSToken(
+          filename,
+          fileSize,
+          typeInfo.qwenFileType,
+          headers,
+        );
+        checkCancellation();
+        fileUrl = await uploadToOSS(buffer, stsData, filename);
+        fileId = stsData.file_id;
+      } else {
+        throw new AttachmentDownloadError('Attachment URL scheme is not allowed', 400, 'attachment_url_blocked');
       }
 
+      checkCancellation();
+      if (!fileUrl) throw new Error('Qwen upload did not return a file URL');
       if (fileUrl) {
         const typeInfo = detectFileType(filename);
         if (isTextDocument(filename, typeInfo.mime) && fileBuffer) {

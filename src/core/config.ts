@@ -26,6 +26,10 @@ const envSchema = z.object({
   PAGE_TIMEOUT: envInt(60000, 1),
   HTTP_TIMEOUT: envInt(45000, 1),
   COMPLETION_PAGE_IDLE_TTL_MS: envInt(60000, 0).refine(value => value <= 2147483647),
+  ATTACHMENT_DOWNLOAD_MAX_BYTES: envInt(20971520, 1).refine(Number.isSafeInteger),
+  ATTACHMENT_DOWNLOAD_TIMEOUT_MS: envInt(45000, 1).refine(value => value <= 2147483647),
+  ATTACHMENT_DOWNLOAD_MAX_REDIRECTS: envInt(5, 0).refine(value => value <= 10),
+  ATTACHMENT_MAX_FILES: envInt(16, 1).refine(value => value <= 256),
   HEADERS_TIMEOUT: envInt(90000, 1),
   CHAT_TIMEOUT: envInt(120000, 1),
   QWEN_PROVIDER_RETRY_DELAY_MS: envInt(1000, 0),
@@ -119,6 +123,12 @@ export const config = {
     headers: env.HEADERS_TIMEOUT,
     chat: env.CHAT_TIMEOUT,
     streamIdle: env.STREAM_IDLE_TIMEOUT,
+  },
+  attachmentDownload: {
+    maxBytes: env.ATTACHMENT_DOWNLOAD_MAX_BYTES,
+    timeoutMs: env.ATTACHMENT_DOWNLOAD_TIMEOUT_MS,
+    maxRedirects: env.ATTACHMENT_DOWNLOAD_MAX_REDIRECTS,
+    maxFiles: env.ATTACHMENT_MAX_FILES,
   },
   cache: {
     defaultTTL: env.CACHE_TTL,

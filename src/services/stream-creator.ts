@@ -17,6 +17,7 @@ import { CACHED_TIMEZONE, QWEN_WEB_VERSION } from '../utils/qwen-constants.js';
 import crypto from 'crypto';
 import { manageQwenStream } from './stream-lifecycle.js';
 import { acquireCompletionPage, releaseCompletionPage } from './completion-page-pool.js';
+import { AttachmentDownloadError } from './attachment-download.js';
 
 export { updateSessionParent };
 
@@ -781,20 +782,6 @@ export async function createQwenStream(
     ? session.accountId
     : (accountId === 'guest' ? 'guest' : (accountId || 'global'));
 
-  if (sessionKey && !useEconomical) {
-    setSession(sessionKey, {
-      chatId,
-      accountId: chatAccountKey,
-      headers: { ...chatHeaders },
-      parentId: actualParentId,
-      historyComplete: false,
-      updatedAt: Date.now(),
-      instructionsHash: options?.instructionsHash,
-    });
-    console.log(`[Session] Registered session ${sessionKey} -> chat ${chatId} on account ${chatAccountKey}`);
-  }
-
-  markHistoryIncomplete(chatId);
   const returnAccountKey = chatAccountKey;
 
   const resolvedFiles = files || [];
@@ -864,9 +851,11 @@ export async function createQwenStream(
         uploadHeaders['bx-v'] = refreshedHeaders['bx-v'] || uploadHeaders['bx-v'];
       }
       assertAntiBotHeaders(uploadHeaders, 'Multimodal upload');
-      const results = await Promise.all(
-        pendingMultimodal.map(parts => processImagesForQwen(parts, uploadHeaders))
-      );
+      if (pendingMultimodal.reduce((count, parts) => count + parts.filter(part => ['image_url', 'video_url', 'audio_url', 'file_url'].includes(part.type)).length, 0)
+        > config.attachmentDownload.maxFiles) throw new AttachmentDownloadError('Too many attachments', 400, 'attachment_limit');
+      const budget = { remainingBytes: config.attachmentDownload.maxBytes };
+      const results = [];
+      for (const parts of pendingMultimodal) results.push(await processImagesForQwen(parts, uploadHeaders, { signal: options?.signal, budget }));
       const docTextParts: string[] = [];
       for (const r of results) {
         resolvedFiles.push(...r.files);
@@ -878,10 +867,26 @@ export async function createQwenStream(
         finalPrompt = `${finalPrompt}\n\n[DOCUMENTS ATTACHED BY THE USER — read their contents below and incorporate them into your answer]\n${docTextParts.join('\n\n---\n\n')}\n${buildAnswerDirective()}`;
       }
     } catch (err: any) {
+      if (err instanceof AttachmentDownloadError) throw err;
       console.error('[Qwen] Failed to process multimodal uploads:', err.message);
       throw new Error(`Multimodal upload failed: ${err.message}`, { cause: err });
     }
   }
+
+  if (sessionKey && !useEconomical) {
+    setSession(sessionKey, {
+      chatId,
+      accountId: chatAccountKey,
+      headers: { ...chatHeaders },
+      parentId: actualParentId,
+      historyComplete: false,
+      updatedAt: Date.now(),
+      instructionsHash: options?.instructionsHash,
+    });
+    console.log(`[Session] Registered session ${sessionKey} -> chat ${chatId} on account ${chatAccountKey}`);
+  }
+
+  markHistoryIncomplete(chatId);
 
     const timestamp = Math.floor(Date.now() / 1000);
     const fid = crypto.randomUUID();

@@ -137,6 +137,10 @@ CHAT_TIMEOUT=120000
 STREAM_IDLE_TIMEOUT=180000
 ```
 
+Anexos por URL aceitam somente HTTP(S) para endereços públicos. Cada resposta DNS e redirecionamento é validado; a conexão usa os endereços aprovados. O download usa TLS estrito e conexão direta, sem encaminhar cookies, headers do Qwen ou variáveis de proxy do processo. Endereços internos, de loopback e de transição IPv6 são recusados.
+
+`ATTACHMENT_DOWNLOAD_MAX_BYTES` limita cada download e a soma dos bytes decodificados dos anexos do pedido (padrão: 20971520, 20 MiB). O limite também cobre o corpo comprimido de cada download. `ATTACHMENT_MAX_FILES` limita o total de arquivos a 16; `ATTACHMENT_DOWNLOAD_MAX_REDIRECTS` permite até 5 redirecionamentos por arquivo, e `ATTACHMENT_DOWNLOAD_TIMEOUT_MS` limita cada download completo a 45000 ms, incluindo DNS, redirecionamentos e leitura do corpo. Erros de download são devolvidos ao cliente; o anexo não é descartado silenciosamente. Os limites de bytes e quantidade também se aplicam a anexos base64.
+
 ---
 
 ## Gerenciamento de Contas

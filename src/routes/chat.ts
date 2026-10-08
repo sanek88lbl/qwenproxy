@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import crypto from 'crypto';
+import { AttachmentDownloadError } from '../services/attachment-download.js';
 import { createQwenStream, RetryableQwenStreamError, QwenUpstreamError } from '../services/qwen.js';
 import { recordAccountBlock, requiresCrossAccountBootstrap, noteAccountRecovery } from '../core/account-isolation.js';
 import type { OpenAIRequest } from '../utils/types.js';
@@ -590,6 +591,7 @@ export async function chatCompletions(c: Context) {
               noteAccountRecovery(accountId);
               return { stream: result.stream, uiSessionId: result.uiSessionId, accountId };
             } catch (err: any) {
+              if (err instanceof AttachmentDownloadError) throw err;
               requestController.signal.throwIfAborted();
               retries--;
 

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import OSS from 'ali-oss';
 import { Hono } from 'hono';
+import { installAttachmentHttpFixture } from '../helpers/attachment-http.js';
 
 const originalCwd = process.cwd();
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-boundaries-'));
@@ -38,6 +39,7 @@ test('uploads preserve the exact file bytes at the OSS boundary', async t => {
   let uploaded: Buffer[] = [];
   let declaredSizes: number[] = [];
   let download: Uint8Array | undefined;
+  installAttachmentHttpFixture(t, () => ({ headers: { 'content-type': 'image/png' }, chunks: download ? [download] : [] }));
 
   t.mock.method(OSS.prototype, 'put', async (_name: string, bytes: Buffer) => {
     uploaded.push(Buffer.from(bytes));
@@ -47,9 +49,6 @@ test('uploads preserve the exact file bytes at the OSS boundary', async t => {
     if (String(input) === 'https://chat.qwen.ai/api/v2/files/getstsToken') {
       declaredSizes.push(Number(JSON.parse(String(init?.body)).filesize));
       return Response.json({ success: true, data: stsData });
-    }
-    if (String(input) === 'https://fixture.invalid/input.png' && download) {
-      return new Response(Uint8Array.from(download), { headers: { 'Content-Type': 'image/png' } });
     }
     throw new Error('Unexpected network request in upload boundary test');
   });
