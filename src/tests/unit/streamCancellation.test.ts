@@ -187,13 +187,26 @@ test('HTTP stop and client disconnect do not retry or confirm partial history', 
       } else {
         const response = await pending;
         const reader = response.body!.getReader();
-        await reader.read();
+        const firstChunk = await reader.read();
         if (mode === 'stop') {
           const stopped = await app.request('/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ completion_id: response.headers.get('X-Completion-Id'), stop_token: response.headers.get('X-Stop-Token') }),
           });
           assert.equal(stopped.status, 200);
-          while (true) { if ((await reader.read()).done) break; }
+          const decoder = new TextDecoder();
+          let payload = decoder.decode(firstChunk.value, { stream: true });
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            payload += decoder.decode(chunk.value, { stream: true });
+          }
+          payload += decoder.decode();
+          const events = payload.split(/\r?\n\r?\n/).map(event => event.split(/\r?\n/)
+            .filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n')).filter(Boolean);
+          assert.equal(events.filter(event => event === '[DONE]').length, 1);
+          assert.equal(events.at(-1), '[DONE]');
+          const messages = events.slice(0, -1).map(event => JSON.parse(event));
+          assert.ok(messages.some(message => message.error), 'Cancellation must not be emitted as successful completion');
         } else await reader.cancel('fixture client disconnected');
       }
       await until(() => registry.getStreamRegistry().size === 0);
