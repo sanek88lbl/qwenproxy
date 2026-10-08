@@ -10,6 +10,8 @@
 
 import { updateSessionParent } from '../services/qwen.js';
 import { isOverloadMessage } from './overload-detector.js';
+import { parseQwenProviderError } from './qwen-provider-error.js';
+import type { QwenProviderError } from './qwen-provider-error.js';
 import { getIncrementalDelta } from '../routes/chat.js';
 import { StreamingToolParser } from '../tools/parser.js';
 import type { FunctionToolDefinition } from '../tools/types.js';
@@ -34,6 +36,8 @@ export interface QwenStreamChunk {
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    input_tokens_details?: { cached_tokens?: number };
   };
   choices?: Array<{
     delta: QwenStreamDelta;
@@ -49,12 +53,14 @@ export interface ParsedChunkResult {
 }
 
 export interface StreamParserState {
+  upstreamError?: QwenProviderError;
   targetResponseId: string | null;
   currentThoughtIndex: number;
   lastFullContent: string;
   reasoningBuffer: string;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens: number;
   updateMemberDetected: boolean;
   overloadDetected: boolean;
   finishReason: string | null;
@@ -115,6 +121,7 @@ export class QwenStreamParser {
       reasoningBuffer: '',
       promptTokens: 0,
       completionTokens: 0,
+      cachedTokens: 0,
       updateMemberDetected: false,
       overloadDetected: false,
       finishReason: null,
@@ -141,10 +148,11 @@ export class QwenStreamParser {
   }
 
   /** Get token usage statistics. */
-  get usage(): { promptTokens: number; completionTokens: number } {
+  get usage(): { promptTokens: number; completionTokens: number; cachedTokens: number } {
     return {
       promptTokens: this._state.promptTokens,
       completionTokens: this._state.completionTokens,
+      cachedTokens: this._state.cachedTokens,
     };
   }
 
@@ -164,6 +172,10 @@ export class QwenStreamParser {
 
     // Track response_id for session continuity
     this.updateResponseId(chunk);
+    if (!chunk.response_id || !this._state.targetResponseId || chunk.response_id === this._state.targetResponseId) {
+      this._state.upstreamError ??= parseQwenProviderError(chunk) ?? undefined;
+    }
+    if (this._state.upstreamError) return null;
 
     // Track finish_reason if provided
     if (chunk.choices && chunk.choices[0] && chunk.choices[0].finish_reason) {
@@ -187,7 +199,8 @@ export class QwenStreamParser {
         this._state.lastFullContent,
         delta.content,
         this._contentLength,
-        this._contentSuffix
+        this._contentSuffix,
+        'incremental'
       );
       const actualDelta = deltaResult.delta;
       this._state.lastFullContent = deltaResult.matchedContent;
@@ -242,6 +255,7 @@ export class QwenStreamParser {
       reasoningBuffer: '',
       promptTokens: this._state.promptTokens,
       completionTokens: this._state.completionTokens,
+      cachedTokens: this._state.cachedTokens,
       updateMemberDetected: false,
       overloadDetected: false,
       finishReason: null,
@@ -259,9 +273,9 @@ export class QwenStreamParser {
     if (chunk['response.created'] && chunk['response.created'].response_id) {
       if (!this._state.targetResponseId) {
         this._state.targetResponseId = chunk['response.created'].response_id;
+        updateSessionParent(this.uiSessionId, this._state.targetResponseId);
+        this.options.onTargetResponseId?.(this._state.targetResponseId, this.uiSessionId);
       }
-      updateSessionParent(this.uiSessionId, chunk['response.created'].response_id);
-      this.options.onTargetResponseId?.(chunk['response.created'].response_id, this.uiSessionId);
     } else if (chunk.response_id && !this._state.targetResponseId) {
       this._state.targetResponseId = chunk.response_id;
       updateSessionParent(this.uiSessionId, chunk.response_id);
@@ -270,13 +284,15 @@ export class QwenStreamParser {
   }
 
   private updateUsage(chunk: QwenStreamChunk): void {
-    if (chunk.usage) {
-      if (chunk.usage.output_tokens) {
+    if (chunk.usage && (!chunk.response_id || !this._state.targetResponseId || chunk.response_id === this._state.targetResponseId)) {
+      if (chunk.usage.output_tokens !== undefined) {
         this._state.completionTokens = chunk.usage.output_tokens;
       }
-      if (chunk.usage.input_tokens) {
+      if (chunk.usage.input_tokens !== undefined) {
         this._state.promptTokens = chunk.usage.input_tokens;
       }
+      const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? chunk.usage.input_tokens_details?.cached_tokens;
+      if (cachedTokens !== undefined) this._state.cachedTokens = cachedTokens;
     }
   }
 
