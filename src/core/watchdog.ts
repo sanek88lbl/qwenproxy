@@ -2,7 +2,7 @@ import { EventEmitter } from 'events'
 import os from 'os'
 import { config } from './config.js'
 import { metrics } from './metrics.js'
-import { getStreamRegistry } from './stream-registry.js'
+import { getStreamRegistry, abortStream } from './stream-registry.js'
 
 interface HealthStatus {
   ram: 'ok' | 'warning' | 'critical'
@@ -120,9 +120,11 @@ export class Watchdog extends EventEmitter {
     let aborted = 0
     for (const [id, entry] of streams.entries()) {
       if (entry.createdAt && now - entry.createdAt > config.timeouts.streamIdle) {
-        entry.abortController.abort()
-        streams.delete(id)
-        aborted++
+        try {
+          if (await abortStream(id)) aborted++
+        } catch {
+          console.warn(`[Watchdog] Stream ${id} remains registered: transport teardown failed`)
+        }
       }
     }
     if (aborted > 0) {
