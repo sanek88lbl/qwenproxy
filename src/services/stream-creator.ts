@@ -10,11 +10,12 @@ import { getBaseAccountId } from '../core/account-lanes.js';
 import { getRuntimeBool, getRuntimeInt } from '../core/runtime-config.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
-import { getSession, setSession, getSessionParent, updateSessionParent } from './session-manager.js';
+import { getSession, setSession, getSessionParent, updateSessionParent, markHistoryIncomplete } from './session-manager.js';
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
 import { sleep } from '../utils/sleep.js';
 import { CACHED_TIMEZONE, QWEN_WEB_VERSION } from '../utils/qwen-constants.js';
 import crypto from 'crypto';
+import { manageQwenStream } from './stream-lifecycle.js';
 
 export { updateSessionParent };
 
@@ -125,6 +126,7 @@ async function tryDirectCompletionFetch(
   payloadJson: string,
   chatHeaders: Record<string, string>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ stream: ReadableStream<Uint8Array>; controller: AbortController } | undefined> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -133,7 +135,7 @@ async function tryDirectCompletionFetch(
       method: 'POST',
       headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
       body: payloadJson,
-      signal: controller.signal,
+      signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
     });
     clearTimeout(timeoutId);
 
@@ -155,9 +157,12 @@ async function tryDirectCompletionFetch(
     return undefined;
   } catch (err: any) {
     controller.abort();
+    signal?.throwIfAborted();
     if (err instanceof QwenUpstreamError || err instanceof RetryableQwenStreamError) throw err;
     recordDirectFetchFailure(accountId);
     return undefined;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -261,66 +266,6 @@ function markSessionBusy(sessionKey: string): void {
 
 function clearSessionBusy(sessionKey: string): void {
   sessionBusy.delete(sessionKey);
-}
-
-function addIdleTimeoutToStream(
-  stream: ReadableStream<Uint8Array>,
-  controller: AbortController,
-  idleTimeoutMs: number,
-  label: string,
-  onTimeout?: () => void,
-  onDone?: () => void,
-  onActivity?: () => void,
-): ReadableStream<Uint8Array> {
-  let idleTimer: ReturnType<typeof setTimeout> | undefined;
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  const clearIdleTimer = () => {
-    if (idleTimer) {
-      clearTimeout(idleTimer);
-      idleTimer = undefined;
-    }
-  };
-
-  const resetIdleTimer = () => {
-    onActivity?.();
-    clearIdleTimer();
-    idleTimer = setTimeout(() => {
-      const message = `${label} idle timeout after ${idleTimeoutMs}ms without upstream data`;
-      clearIdleTimer();
-      onTimeout?.();
-      try { stream.cancel(message).catch(() => {}); } catch { /* ignore */ }
-    }, idleTimeoutMs);
-  };
-
-  return new ReadableStream<Uint8Array>({
-    start() {
-      reader = stream.getReader();
-      resetIdleTimer();
-    },
-    async pull(streamController) {
-      try {
-        if (!reader) throw new Error('Stream reader was not initialized');
-        const { done, value } = await reader.read();
-        if (done) {
-          clearIdleTimer();
-          onDone?.();
-          streamController.close();
-          return;
-        }
-        resetIdleTimer();
-        streamController.enqueue(value);
-      } catch (err) {
-        clearIdleTimer();
-        onDone?.();
-        streamController.error(err);
-      }
-    },
-    cancel(reason) {
-      clearIdleTimer();
-      onDone?.();
-      return stream.cancel(reason);
-    },
-  });
 }
 
 const nativeToolsDisabled = new Set<string>();
@@ -588,6 +533,7 @@ export async function fetchQwenChatHistory(
 }
 
 export interface CreateQwenStreamOptions {
+  signal?: AbortSignal;
   /** Client conversation key (OpenAI `user` field or x-qwen-session header). */
   sessionKey?: string;
   /** System + last user message only. Used when the server-side history can supply context. */
@@ -610,7 +556,8 @@ export async function createQwenStream(
   files?: QwenFileEntry[],
   pendingMultimodal?: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>>,
   options?: CreateQwenStreamOptions,
-): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string }> {
+): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string, cancel: (reason?: unknown) => Promise<void> }> {
+  options?.signal?.throwIfAborted();
   const sessionKey = options?.sessionKey;
   const session = sessionKey && !options?.forceBootstrap ? getSession(sessionKey) : undefined;
 
@@ -678,23 +625,12 @@ export async function createQwenStream(
     controller: AbortController,
     timeoutMs: number,
     label: string,
-    onTimeout?: () => void,
-  ) => {
-    return addIdleTimeoutToStream(
-      stream,
-      controller,
-      timeoutMs,
-      label,
-      onTimeout,
-      () => {
-        onTimeout?.();
-        releaseStreamResources();
-      },
-      () => accountSlot.touch(),
-    );
-  };
+    abortTransport?: () => void | Promise<void>,
+  ) => manageQwenStream(stream, controller, timeoutMs, label, abortTransport,
+    releaseStreamResources, () => accountSlot.touch(), options?.signal);
 
   try {
+  options?.signal?.throwIfAborted();
   const payloadPrompt = useEconomical && options?.economicalPrompt ? options.economicalPrompt : prompt;
   const LARGE_PROMPT_THRESHOLD = config.largePromptThreshold;
   const needsFileUpload = Buffer.byteLength(payloadPrompt, 'utf-8') > LARGE_PROMPT_THRESHOLD && !config.largePromptInline;
@@ -848,6 +784,7 @@ export async function createQwenStream(
     console.log(`[Session] Registered session ${sessionKey} -> chat ${chatId} on account ${chatAccountKey}`);
   }
 
+  markHistoryIncomplete(chatId);
   const returnAccountKey = chatAccountKey;
 
   const resolvedFiles = files || [];
@@ -989,6 +926,7 @@ export async function createQwenStream(
     const payloadMB = payloadSize / (1024 * 1024);
     const timeoutMs = BASE_TIMEOUT_MS + Math.ceil(payloadMB * TIMEOUT_PER_MB);
 
+    options?.signal?.throwIfAborted();
     const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
 
     // Direct fast path: POST from Node with the captured anti-bot headers,
@@ -1007,11 +945,12 @@ export async function createQwenStream(
         payloadJson,
         chatHeaders,
         timeoutMs,
+        options?.signal,
       );
       if (direct) {
         const controller = direct.controller;
         return {
-          stream: wrapLeasedStream(direct.stream, controller, timeoutMs, `Qwen direct stream ${chatId}`, () => controller.abort()),
+          ...wrapLeasedStream(direct.stream, controller, timeoutMs, `Qwen direct stream ${chatId}`),
           headers: chatHeaders,
           uiSessionId: chatId,
           controller,
@@ -1027,21 +966,26 @@ export async function createQwenStream(
     const page = process.env.TEST_MOCK_PLAYWRIGHT
       ? getPageForAccount(effectiveAccountId)
       : await waitForAccountPage(effectiveAccountId, 15000);
+    options?.signal?.throwIfAborted();
     if (page) {
-      const completionPage = page;
+      const completionPage = await openIsolatedQwenPage(page, undefined, options?.signal);
+      let streamTransferred = false;
       try {
         const browserResult = await browserStreamFetch(completionPage, url, {
           method: 'POST',
           headers: buildBrowserCompletionHeaders(chatHeaders),
           body: payloadJson,
           timeoutMs,
+          closeOnAbortTimeout: true,
+          signal: options?.signal,
         });
 
         if (browserResult.contentType.includes('text/event-stream') && browserResult.status < 400) {
           const controller = new AbortController();
+          streamTransferred = true;
           return {
-            stream: wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
-              browserResult.abort();
+            ...wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async () => {
+              try { await browserResult.abort(); } finally { await completionPage.close(); }
             }),
             headers: chatHeaders,
             uiSessionId: chatId,
@@ -1063,12 +1007,15 @@ export async function createQwenStream(
                 headers: buildBrowserCompletionHeaders(freshHeaders),
                 body: payloadJson,
                 timeoutMs,
+                closeOnAbortTimeout: true,
+                signal: options?.signal,
               });
               if (retryResult.contentType.includes('text/event-stream') && retryResult.status < 400) {
                 const controller = new AbortController();
+                streamTransferred = true;
                 return {
-                  stream: wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
-                    retryResult.abort();
+                  ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async () => {
+                    try { await retryResult.abort(); } finally { await completionPage.close(); }
                   }),
                   headers: freshHeaders,
                   uiSessionId: chatId,
@@ -1102,12 +1049,15 @@ export async function createQwenStream(
               headers: buildBrowserCompletionHeaders(freshHeaders),
               body: payloadJson,
               timeoutMs,
+              closeOnAbortTimeout: true,
+              signal: options?.signal,
             });
             if (retryResult.contentType.includes('text/event-stream') && retryResult.status < 400) {
               const controller = new AbortController();
+              streamTransferred = true;
               return {
-                stream: wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, () => {
-                  retryResult.abort();
+                ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async () => {
+                  try { await retryResult.abort(); } finally { await completionPage.close(); }
                 }),
                 headers: freshHeaders,
                 uiSessionId: chatId,
@@ -1127,6 +1077,8 @@ export async function createQwenStream(
       } catch (browserErr: any) {
         if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
         throw new Error(`Browser stream fetch failed with active Qwen page: ${browserErr.message}`, { cause: browserErr });
+      } finally {
+        if (!streamTransferred) await completionPage.close();
       }
     }
 
@@ -1142,7 +1094,7 @@ export async function createQwenStream(
         method: 'POST',
         headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
         body: payloadJson,
-        signal: controller.signal
+        signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
       });
     } finally {
       clearTimeout(timeoutId);
@@ -1150,7 +1102,7 @@ export async function createQwenStream(
 
     const responseContentType = response.headers.get('content-type') || '';
     if (process.env.TEST_MOCK_PLAYWRIGHT && response.ok && response.body) {
-      return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: returnAccountKey };
+      return { ...wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: returnAccountKey };
     }
 
     if (response.ok && !responseContentType.includes('text/event-stream') && response.body) {
@@ -1166,17 +1118,21 @@ export async function createQwenStream(
           await sleep(500 + Math.floor(Math.random() * 1000));
           const retryController = new AbortController();
           const retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
-          const retryResponse = await fetch(url, {
-            method: 'POST',
-            headers: buildNodeCompletionHeaders(freshHeaders, chatId, accountId),
-            body: payloadJson,
-            signal: retryController.signal
-          });
-          clearTimeout(retryTimeoutId);
+          let retryResponse: Response;
+          try {
+            retryResponse = await fetch(url, {
+              method: 'POST',
+              headers: buildNodeCompletionHeaders(freshHeaders, chatId, accountId),
+              body: payloadJson,
+              signal: options?.signal ? AbortSignal.any([retryController.signal, options.signal]) : retryController.signal,
+            });
+          } finally {
+            clearTimeout(retryTimeoutId);
+          }
 
           const retryContentType = retryResponse.headers.get('content-type') || '';
           if (retryResponse.ok && retryContentType.includes('text/event-stream') && retryResponse.body) {
-            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: returnAccountKey };
+            return { ...wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: returnAccountKey };
           }
 
           const retryPeek = await retryResponse.clone().text().catch(() => '');
@@ -1189,7 +1145,7 @@ export async function createQwenStream(
           }
 
           if (retryResponse.ok && retryResponse.body) {
-            return { stream: wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: returnAccountKey };
+            return { ...wrapLeasedStream(retryResponse.body, retryController, timeoutMs, `Qwen stream ${chatId}`), headers: freshHeaders, uiSessionId: chatId, controller: retryController, accountId: returnAccountKey };
           }
         } catch (retryErr) {
           if (retryErr instanceof QwenUpstreamError) throw retryErr;
@@ -1212,7 +1168,7 @@ export async function createQwenStream(
       throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
     }
 
-    return { stream: wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: returnAccountKey };
+    return { ...wrapLeasedStream(response.body, controller, timeoutMs, `Qwen stream ${chatId}`), headers: chatHeaders, uiSessionId: chatId, controller, accountId: returnAccountKey };
   } catch (err) {
     releaseStreamResources();
     throw err;
