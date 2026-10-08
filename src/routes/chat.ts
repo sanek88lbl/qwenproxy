@@ -32,7 +32,7 @@ function msUntilMidnight(): number {
   tomorrow.setHours(0, 0, 0, 0);
   return tomorrow.getTime() - now.getTime();
 }
-import { getSession, resolveSessionKey, markHistoryIncomplete } from '../services/session-manager.js';
+import { getSession, resolveOwnedSessionKey, SessionAccessError, markHistoryIncomplete } from '../services/session-manager.js';
 import { lookupToolCall } from '../core/tool-call-registry.js';
 import type { SessionEntry } from '../services/session-manager.js';
 import { fetchQwenChatHistory } from '../services/qwen.js';
@@ -46,7 +46,7 @@ import {
 } from './tool-handler.js';
 import { handleStreamingResponse, collectNonStreamingResult } from './stream-handler.js';
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
-import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams } from '../core/user-manager.js';
+import { checkUserRateLimit, tryAcquireUserSlot, releaseUserSlot, getUserActiveStreams, getUserPrincipal } from '../core/user-manager.js';
 import { getRuntimeBool } from '../core/runtime-config.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TOOL_CALL_OPEN, TOOL_CALL_CLOSE, wrapToolCallPayload } from '../tools/toolcall-tags.js';
@@ -157,6 +157,7 @@ function buildRecentToolContext(
 
 export async function chatCompletions(c: Context) {
   const user = (c as any).get?.('user') as UserIdentity | undefined;
+  const principal = getUserPrincipal(user);
   let detachAbort = () => {};
   let activeCompletionId: string | undefined;
   let userSlotHeld = false;
@@ -165,7 +166,7 @@ export async function chatCompletions(c: Context) {
     detachAbort();
     if (!userSlotHeld || userSlotReleased || !user) return;
     userSlotReleased = true;
-    releaseUserSlot(user.id);
+    releaseUserSlot(principal);
   };
   let usageInputText = '';
   let usageModel = '';
@@ -183,15 +184,15 @@ export async function chatCompletions(c: Context) {
     metrics.increment('requests.completions');
 
     if (user) {
-      if (!checkUserRateLimit(user.id, user.rateLimitRpm)) {
+      if (!checkUserRateLimit(principal, user.rateLimitRpm)) {
         return c.json({ error: { message: `Rate limit exceeded for user ${user.id}` } }, 429);
       }
-      if (!tryAcquireUserSlot(user.id, user.maxConcurrency)) {
+      if (!tryAcquireUserSlot(principal, user.maxConcurrency)) {
         return c.json({ error: { message: `Concurrency limit exceeded for user ${user.id} (max ${user.maxConcurrency})` } }, 429);
       }
       userSlotHeld = true;
-      if (getUserActiveStreams(user.id) <= user.maxConcurrency) {
-        console.log(`[Chat] user=${user.id} activeStreams=${getUserActiveStreams(user.id)}`);
+      if (getUserActiveStreams(principal) <= user.maxConcurrency) {
+        console.log(`[Chat] user=${user.id} activeStreams=${getUserActiveStreams(principal)}`);
       }
     }
     
@@ -212,7 +213,7 @@ export async function chatCompletions(c: Context) {
       ? (body as any).user.trim()
       : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
     const sessionChatId = earlyRawSessionKey
-      ? getSession(resolveSessionKey(earlyRawSessionKey) ?? earlyRawSessionKey)?.chatId
+      ? getSession(resolveOwnedSessionKey(principal, earlyRawSessionKey))?.chatId
       : undefined;
     let lastUserContent = '';
     for (const msg of messages) {
@@ -286,6 +287,7 @@ export async function chatCompletions(c: Context) {
             const rec = sessionChatId ? lookupToolCall(sessionChatId, msg.tool_call_id) : undefined;
             if (rec) toolName = rec.name;
           }
+          if (!toolName) throw Object.assign(new Error('Unrecognized tool_call_id for this session'), { upstreamStatus: 400 });
         }
         promptParts.push(`Tool Response (${toolName || 'tool'}): ${contentStr || ''}\n`);
       }
@@ -373,7 +375,7 @@ export async function chatCompletions(c: Context) {
     const rawSessionKey = (typeof bodyAny.user === 'string' && bodyAny.user.trim())
       ? bodyAny.user.trim()
       : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
-    const sessionKey = rawSessionKey ? (resolveSessionKey(rawSessionKey) ?? rawSessionKey) : undefined;
+    const sessionKey = rawSessionKey ? resolveOwnedSessionKey(principal, rawSessionKey) : undefined;
     const session = sessionKey ? getSession(sessionKey) : undefined;
     const instructionsHash = crypto.createHash('sha256').update(JSON.stringify({ modelId, systemPrompt, toolChoice: bodyAny.tool_choice ?? 'auto' })).digest('hex');
     const lastMsg = messages[messages.length - 1];
@@ -443,7 +445,7 @@ export async function chatCompletions(c: Context) {
     clientSignal.addEventListener('abort', onClientAbort, { once: true });
     detachAbort = () => clientSignal.removeEventListener('abort', onClientAbort);
     if (clientSignal.aborted) onClientAbort();
-    const baseStreamOptions = { sessionKey, economicalPrompt, instructionsHash, signal: requestController.signal };
+    const baseStreamOptions = { sessionKey, sessionOwner: principal, economicalPrompt, instructionsHash, signal: requestController.signal };
 
     const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', false);
     const completionId = 'chatcmpl-' + crypto.randomUUID();
@@ -455,6 +457,7 @@ export async function chatCompletions(c: Context) {
         requestController.signal.throwIfAborted();
       }
       registerStream(completionId, {
+        owner: principal,
         abortController: requestController,
         accountId: result.accountId,
         uiSessionId: result.uiSessionId,
@@ -591,6 +594,7 @@ export async function chatCompletions(c: Context) {
               noteAccountRecovery(accountId);
               return { stream: result.stream, uiSessionId: result.uiSessionId, accountId };
             } catch (err: any) {
+              if (err instanceof SessionAccessError) throw err;
               if (err instanceof AttachmentDownloadError) throw err;
               requestController.signal.throwIfAborted();
               retries--;
@@ -951,6 +955,9 @@ export async function chatCompletionsStop(c: Context) {
     if (found === 'ambiguous') return c.json({ error: 'Ambiguous chat_id; use completion_id' }, 409);
     if (!found) return c.json({ error: 'Stream not found' }, 404);
     const { key, entry } = found;
+    if (entry.owner !== getUserPrincipal((c as any).get?.('user'))) {
+      return c.json({ error: 'Stream is not assigned to the authenticated owner' }, 403);
+    }
     const tokenBuf = Buffer.from(stop_token);
     const expectedBuf = Buffer.from(entry.stopToken);
     if (tokenBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(tokenBuf, expectedBuf)) {

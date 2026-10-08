@@ -82,7 +82,7 @@ function historyResponse(_lastUserContent: string, parentId: string): Response {
 test('user-manager: resolves per-user and global identities', () => {
   process.env.API_KEY = '';
   const perUser = resolveUserFromAuthHeader('Bearer sk-user-a');
-  assert.ok(perUser, 'env-seeded per-user key must resolve');
+  assert.ok(perUser, 'configured per-user key must resolve');
   assert.strictEqual(perUser!.id, 'userOne');
   assert.strictEqual(perUser!.isGlobal, false);
 
@@ -140,7 +140,7 @@ test('session reconciliation: matching server history keeps economical mode', as
     // Turn 1: bootstrap.
     const r1 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-user-a' },
       body: JSON.stringify({ model: 'qwen3.6-plus', user: 'conv-recon', messages: [{ role: 'user', content: 'Turn 1' }] })
     }));
     assert.strictEqual(r1.status, 200);
@@ -149,7 +149,7 @@ test('session reconciliation: matching server history keeps economical mode', as
     // Turn 2: session verified against the server → economical (only last turn).
     const r2 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-user-a' },
       body: JSON.stringify({
         model: 'qwen3.6-plus',
         user: 'conv-recon',
@@ -193,7 +193,7 @@ test('session reconciliation: diverged server history forces a full re-bootstrap
 
     const r1 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-user-a' },
       body: JSON.stringify({ model: 'qwen3.6-plus', user: 'conv-div', messages: [{ role: 'user', content: 'Turn 1' }] })
     }));
     assert.strictEqual(r1.status, 200);
@@ -201,7 +201,7 @@ test('session reconciliation: diverged server history forces a full re-bootstrap
 
     const r2 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-user-a' },
       body: JSON.stringify({
         model: 'qwen3.6-plus',
         user: 'conv-div',

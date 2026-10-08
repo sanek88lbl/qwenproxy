@@ -545,6 +545,7 @@ export async function fetchQwenChatHistory(
 
 export interface CreateQwenStreamOptions {
   signal?: AbortSignal;
+  sessionOwner?: string;
   /** Client conversation key (OpenAI `user` field or x-qwen-session header). */
   sessionKey?: string;
   /** System + last user message only. Used when the server-side history can supply context. */
@@ -882,6 +883,7 @@ export async function createQwenStream(
       historyComplete: false,
       updatedAt: Date.now(),
       instructionsHash: options?.instructionsHash,
+      owner: options?.sessionOwner,
     });
     console.log(`[Session] Registered session ${sessionKey} -> chat ${chatId} on account ${chatAccountKey}`);
   }

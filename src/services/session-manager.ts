@@ -30,6 +30,33 @@ export interface SessionEntry {
   historyComplete: boolean;
   updatedAt: number;
   instructionsHash?: string;
+  owner?: string | null;
+}
+
+export class SessionAccessError extends Error {
+  readonly upstreamStatus = 403;
+  constructor() { super('Session is not assigned to the authenticated owner'); }
+}
+
+export function ownedSessionKey(owner: string, clientKey: string): string {
+  return JSON.stringify(['session', owner, clientKey]);
+}
+
+export function resolveOwnedSessionKey(owner: string, clientKey: string): string {
+  loadSessionsFromDb();
+  cleanupSessions();
+  const canonical = ownedSessionKey(owner, clientKey);
+  const direct = sessions.get(canonical);
+  if (direct) {
+    if (direct.owner !== owner) throw new SessionAccessError();
+    return canonical;
+  }
+  const alias = chatToSession.get(clientKey);
+  if (alias) {
+    if (sessions.get(alias)?.owner !== owner) throw new SessionAccessError();
+    return alias;
+  }
+  return canonical;
 }
 
 const MAX_SESSIONS = 2000;
@@ -51,9 +78,12 @@ function loadSessionsFromDb(): void {
   sessionsLoaded = true;
   try {
     const rows = listSessions();
+    sessions.clear();
+    chatToSession.clear();
+    chatParents.clear();
     const now = Date.now();
     for (const row of rows) {
-      if (now - row.updated_at > sessionTtlMs()) {
+      if (row.owner != null && now - row.updated_at > sessionTtlMs()) {
         deleteSession(row.session_key);
         continue;
       }
@@ -69,20 +99,26 @@ function loadSessionsFromDb(): void {
         historyComplete: row.history_complete !== 0,
         updatedAt: row.updated_at,
         instructionsHash: row.instructions_hash || undefined,
+        owner: row.owner ?? null,
       };
       sessions.set(row.session_key, entry);
-      chatToSession.set(row.chat_id, row.session_key);
-      chatParents.set(row.chat_id, { parentId: row.parent_id, updatedAt: row.updated_at });
+      const alias = chatToSession.get(row.chat_id);
+      if (!alias || (sessions.get(alias)?.owner == null && entry.owner != null)) {
+        chatToSession.set(row.chat_id, row.session_key);
+        chatParents.set(row.chat_id, { parentId: row.parent_id, updatedAt: row.updated_at });
+      }
     }
     if (rows.length > 0) {
       console.log(`[Session] Restored ${rows.length} session(s) from SQLite`);
     }
   } catch (err: any) {
+    sessionsLoaded = false;
     console.warn(`[Session] Failed to restore sessions from SQLite:`, err.message);
+    throw err;
   }
 }
 
-function persistSession(sessionKey: string, entry: SessionEntry): void {
+function persistSession(sessionKey: string, entry: SessionEntry, strict = false): void {
   try {
     upsertSession({
       session_key: sessionKey,
@@ -93,8 +129,10 @@ function persistSession(sessionKey: string, entry: SessionEntry): void {
       history_complete: entry.historyComplete ? 1 : 0,
       updated_at: entry.updatedAt,
       instructions_hash: entry.instructionsHash,
+      owner: entry.owner ?? null,
     });
   } catch (err: any) {
+    if (strict) throw err;
     console.warn(`[Session] Failed to persist session ${sessionKey} to SQLite:`, err.message);
   }
 }
@@ -105,9 +143,9 @@ function cleanupSessions(): void {
   lastCleanup = now;
 
   for (const [key, entry] of sessions.entries()) {
-    if (now - entry.updatedAt > sessionTtlMs()) {
+    if (entry.owner != null && now - entry.updatedAt > sessionTtlMs()) {
       sessions.delete(key);
-      chatToSession.delete(entry.chatId);
+      if (chatToSession.get(entry.chatId) === key) chatToSession.delete(entry.chatId);
       try { deleteSession(key); } catch { /* ignore */ }
     }
   }
@@ -129,18 +167,25 @@ export function setSession(sessionKey: string, entry: SessionEntry): void {
   loadSessionsFromDb();
   cleanupSessions();
   const now = Date.now();
-  const stored = { ...entry, updatedAt: now };
-  chatToSession.delete(entry.chatId);
+  const previous = sessions.get(sessionKey);
+  if (previous && (previous.owner ?? null) !== (entry.owner ?? null)) throw new SessionAccessError();
+  const alias = chatToSession.get(entry.chatId);
+  if (alias && alias !== sessionKey) throw new SessionAccessError();
+  const stored = { ...entry, owner: entry.owner ?? null, updatedAt: now };
+  persistSession(sessionKey, stored, true);
+  if (previous && previous.chatId !== entry.chatId && chatToSession.get(previous.chatId) === sessionKey) {
+    chatToSession.delete(previous.chatId);
+    chatParents.delete(previous.chatId);
+  }
   sessions.set(sessionKey, stored);
   chatToSession.set(entry.chatId, sessionKey);
   chatParents.set(entry.chatId, { parentId: entry.parentId, updatedAt: now });
-  persistSession(sessionKey, stored);
 }
 
 export function removeSession(sessionKey: string): void {
   loadSessionsFromDb();
   const entry = sessions.get(sessionKey);
-  if (entry) {
+  if (entry && chatToSession.get(entry.chatId) === sessionKey) {
     chatToSession.delete(entry.chatId);
     chatParents.delete(entry.chatId);
   }

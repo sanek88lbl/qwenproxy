@@ -17,19 +17,21 @@ export function getDatabase(): Database.Database {
   }
 
   db = new Database(DB_PATH)
-
-  // Enable WAL mode for better concurrent read performance (ideal for VPS)
-  db.pragma('journal_mode = WAL')
-  db.pragma('busy_timeout = 5000')
-  db.pragma('synchronous = NORMAL')
-  db.pragma('cache_size = -64000') // 64MB cache
-  db.pragma('foreign_keys = ON')
-
-  runMigrations(db)
-  migrateFromJson(db)
-  encryptPlaintextPasswords(db)
-
-  return db
+  try {
+    // Enable WAL mode for better concurrent read performance (ideal for VPS)
+    db.pragma('journal_mode = WAL')
+    db.pragma('busy_timeout = 5000')
+    db.pragma('synchronous = NORMAL')
+    db.pragma('cache_size = -64000') // 64MB cache
+    db.pragma('foreign_keys = ON')
+    runMigrations(db)
+    migrateFromJson(db)
+    encryptPlaintextPasswords(db)
+    return db
+  } catch (error) {
+    try { db.close() } finally { db = null }
+    throw error
+  }
 }
 
 function runMigrations(db: Database.Database): void {
@@ -94,6 +96,12 @@ function runMigrations(db: Database.Database): void {
   if (!sessionColumns.some(column => column.name === 'instructions_hash')) {
     db.exec(`ALTER TABLE sessions ADD COLUMN instructions_hash TEXT;`)
   }
+  db.transaction(() => {
+    if (!(db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).some(column => column.name === 'owner')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN owner TEXT;');
+    }
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_owned_chat ON sessions(chat_id) WHERE owner IS NOT NULL;');
+  })();
 }
 
 function encryptPlaintextPasswords(db: Database.Database): void {
@@ -194,6 +202,10 @@ export function listUsers(): UserRow[] {
     .all() as UserRow[]
 }
 
+export function hasUsers(): boolean {
+  return Boolean(getDatabase().prepare('SELECT 1 FROM users LIMIT 1').get());
+}
+
 export function upsertUser(entry: {
   id: string
   email?: string | null
@@ -230,17 +242,18 @@ export interface SessionRow {
   history_complete: number
   updated_at: number
   instructions_hash?: string | null
+  owner?: string | null
 }
 
 export function listSessions(): SessionRow[] {
-  return getDatabase().prepare('SELECT session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash FROM sessions').all() as SessionRow[]
+  return getDatabase().prepare('SELECT session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash, owner FROM sessions').all() as SessionRow[]
 }
 
 export function upsertSession(row: SessionRow): void {
-  getDatabase()
+  const result = getDatabase()
     .prepare(`
-      INSERT INTO sessions (session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash, owner)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_key) DO UPDATE SET
         chat_id = excluded.chat_id,
         account_id = excluded.account_id,
@@ -249,8 +262,10 @@ export function upsertSession(row: SessionRow): void {
         history_complete = excluded.history_complete,
         updated_at = excluded.updated_at,
         instructions_hash = excluded.instructions_hash
+      WHERE sessions.owner IS excluded.owner
     `)
-    .run(row.session_key, row.chat_id, row.account_id, row.headers, row.parent_id, row.history_complete, row.updated_at, row.instructions_hash ?? null)
+    .run(row.session_key, row.chat_id, row.account_id, row.headers, row.parent_id, row.history_complete, row.updated_at, row.instructions_hash ?? null, row.owner ?? null)
+  if (result.changes !== 1) throw new Error('Session ownership conflict');
 }
 
 export function deleteSession(sessionKey: string): void {
