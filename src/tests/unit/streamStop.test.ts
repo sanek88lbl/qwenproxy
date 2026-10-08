@@ -28,7 +28,7 @@ test('stop resolves trusted upstream IDs and keeps local teardown independent of
   function register(key = 'chatcmpl-fixture', chat = 'upstream-fixture', response = 'response-fixture') {
     registry.registerStream(key, {
       abortController: new AbortController(), accountId: 'fixture', uiSessionId: chat,
-      targetResponseId: response, stopToken: 'fixture-stop-token', headers,
+      targetResponseId: response, stopToken: 'fixture-stop-token', headers, owner: JSON.stringify(['anonymous']),
       cancel: async () => { cancelled++; },
     });
   }

@@ -284,7 +284,7 @@ test('cancelling economical reuse keeps the persisted history incomplete', async
 
 test('HTTP stop and client disconnect do not retry or confirm partial history', { timeout: 5000 }, async t => {
   const { addAccount } = await import('../../core/accounts.js');
-  const { getSession } = await import('../../services/session-manager.js');
+  const { getSession, ownedSessionKey } = await import('../../services/session-manager.js');
   addAccount('fixture@example.invalid', 'fixture-password', 'http-fixture');
   process.env.TEST_MOCK_PLAYWRIGHT = 'true';
   const app = new Hono();
@@ -367,7 +367,7 @@ test('HTTP stop and client disconnect do not retry or confirm partial history', 
       }
       await until(() => registry.getStreamRegistry().size === 0);
       assert.equal(getAccountActiveLoad('http-fixture'), 0);
-      assert.equal(getSession(key)?.historyComplete, false);
+      assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), key))?.historyComplete, false);
     }
     assert.equal(posts, 5);
     assert.equal(cancellations, 4);
@@ -378,10 +378,10 @@ test('HTTP stop and client disconnect do not retry or confirm partial history', 
 
 test('non-streaming teardown failure keeps its account lease and registry entry', { timeout: 10000 }, async t => {
   const { addAccount } = await import('../../core/accounts.js');
-  const { setSession, getSession } = await import('../../services/session-manager.js');
+  const { setSession, getSession, ownedSessionKey } = await import('../../services/session-manager.js');
   const { markAccountStreamEnd } = await import('../../core/account-manager.js');
   addAccount('failed-http@example.invalid', 'fixture', 'failed-http-account');
-  setSession('failed-http-session', { chatId: 'failed-http-chat', accountId: 'failed-http-account', headers,
+  setSession(ownedSessionKey(JSON.stringify(['anonymous']), 'failed-http-session'), { owner: JSON.stringify(['anonymous']), chatId: 'failed-http-chat', accountId: 'failed-http-account', headers,
     parentId: 'previous-response', historyComplete: true, updatedAt: Date.now() });
   process.env.TEST_MOCK_PLAYWRIGHT = 'true';
   const app = new Hono();
@@ -412,7 +412,7 @@ test('non-streaming teardown failure keeps its account lease and registry entry'
     assert.ok((await pending).status >= 400);
     assert.equal(registry.getStream(key), entry);
     assert.equal(getAccountActiveLoad('failed-http-account'), 1);
-    assert.equal(getSession('failed-http-session')?.historyComplete, false);
+    assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'failed-http-session'))?.historyComplete, false);
     assert.equal(posts, 1);
   } finally {
     abort.abort();

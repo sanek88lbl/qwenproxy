@@ -17,7 +17,7 @@ const { closeDatabase } = await import('../../core/database.js');
 const { clearAccountIsolation } = await import('../../core/account-isolation.js');
 const { getAccountCooldownInfo, getAccountActiveLoad } = await import('../../core/account-manager.js');
 const { registerStream, getStream } = await import('../../core/stream-registry.js');
-const { getSession, resetAllSessions, setSession } = await import('../../services/session-manager.js');
+const { getSession, resetAllSessions, setSession, ownedSessionKey } = await import('../../services/session-manager.js');
 const { TOOL_CALL_OPEN, TOOL_CALL_CLOSE } = await import('../../tools/toolcall-tags.js');
 const accounts = ['a', 'b', 'c'].map(name => addAccount(`provider-${name}@example.test`, 'fixture-password', `provider-${name}`));
 const overloaded = { code: 'quota_limit', details: 'O serviço está com alta demanda no momento. Tente novamente mais tarde.' };
@@ -63,13 +63,13 @@ for (const streaming of [false, true]) {
         if (scenario === 'repeated-overload' || scenario === 'unknown-error') {
           assert.equal(response.status, streaming ? 200 : scenario === 'repeated-overload' ? 503 : 502);
           assert.equal(error?.code, scenario === 'repeated-overload' ? 'UpstreamOverloaded' : 'UpstreamError');
-          assert.equal(getSession('provider-route')?.historyComplete, false);
+          assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'provider-route'))?.historyComplete, false);
           if (!streaming && scenario === 'repeated-overload') assert.equal(response.headers.get('retry-after'), '2');
         } else {
           assert.equal(response.status, 200);
           assert.equal(error, undefined);
           assert.equal(streaming ? rows.map(row => row.choices?.[0]?.delta?.content || '').join('') : rows[0].choices[0].message.content, ordinary);
-          assert.equal(getSession('provider-route')?.historyComplete, true);
+          assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'provider-route'))?.historyComplete, true);
           assert.equal(response.headers.get('retry-after'), null, 'a recovered success must not inherit the failed attempt header');
         }
         assert.equal(posts, scenario === 'unknown-error' ? 1 : 2);

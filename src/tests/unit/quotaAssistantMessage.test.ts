@@ -24,7 +24,7 @@ const { addAccount } = await import('../../core/accounts.js');
 const { closeDatabase } = await import('../../core/database.js');
 const { getInUseAccounts, getAccountCooldownInfo, getAccountActiveLoad, releaseAccountInUse } = await import('../../core/account-manager.js');
 const { clearAccountIsolation } = await import('../../core/account-isolation.js');
-const { setSession, getSession, resetAllSessions } = await import('../../services/session-manager.js');
+const { setSession, getSession, resetAllSessions, ownedSessionKey } = await import('../../services/session-manager.js');
 const { config } = await import('../../core/config.js');
 const accounts = ['first', 'second', 'third'].map(name => addAccount(`${name}@example.test`, 'fixture-password', `quota-${name}`));
 const english = "You've reached today's chat limit. Try again tomorrow.";
@@ -228,7 +228,7 @@ test('JSON continuation quota rotates the actual account and replaces the incomp
   const routed: string[] = [];
   const partial = 'The following code continues:\n```ts\nconst answer = 42;';
   globalThis.fetch = async () => {
-    routed.push(getSession('quota-continue-route')?.accountId || 'missing');
+    routed.push(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'quota-continue-route'))?.accountId || 'missing');
     return new Response(upstream(routed.length === 1 ? partial : routed.length === 2 ? english : ordinary, `continue-${routed.length}`), { headers: { 'content-type': 'text/event-stream' } });
   };
   try {
@@ -241,7 +241,7 @@ test('JSON continuation quota rotates the actual account and replaces the incomp
     assert.notEqual(routed[1], routed[2]);
     assert.equal(getAccountCooldownInfo(routed[1])?.reason, 'RateLimited');
     assert.equal(getAccountCooldownInfo(routed[2]), null);
-    assert.equal(getSession('quota-continue-route')?.historyComplete, true);
+    assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'quota-continue-route'))?.historyComplete, true);
     for (const account of accounts) assert.equal(getAccountActiveLoad(account.id), 0);
   } finally {
     globalThis.fetch = originalFetch;
@@ -271,8 +271,8 @@ for (const streaming of [false, true]) {
       assert.equal(new Set(routed.slice(0, 3)).size, 3);
       assert.equal(routed[3], routed[2]);
       assert.equal(getAccountCooldownInfo(routed[0])?.reason, 'RateLimited');
-      assert.equal(getSession('quota-combined-route')?.accountId, routed[2]);
-      assert.equal(getSession('quota-combined-route')?.historyComplete, true);
+      assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'quota-combined-route'))?.accountId, routed[2]);
+      assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'quota-combined-route'))?.historyComplete, true);
       if (streaming) assert.equal(parsed(text).done, 1);
       for (const account of accounts) assert.equal(getAccountActiveLoad(account.id), 0);
     } finally {
@@ -308,13 +308,13 @@ for (const streaming of [false, true]) {
             assert.equal(getAccountCooldownInfo(routed[0])?.reason, 'RateLimited');
             assert.equal(getAccountCooldownInfo(routed[1]), null);
           } else for (const account of accounts) assert.equal(getAccountCooldownInfo(account.id), null);
-          assert.equal(getSession('quota-route-session')?.historyComplete, true);
+          assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'quota-route-session'))?.historyComplete, true);
         } else {
           assert.equal(response.status, streaming ? 200 : 429);
           assert.equal(data.chunks.find(chunk => chunk.error)?.error.code, 'RateLimited');
           assert.equal(data.content, '');
           assert.equal(routed.length, 3, 'try each configured account at most once and do not fall through to guest');
-          assert.equal(getSession('quota-route-session')?.historyComplete, false);
+          assert.equal(getSession(ownedSessionKey(JSON.stringify(['anonymous']), 'quota-route-session'))?.historyComplete, false);
           if (scenario === 'all-quota') for (const account of accounts) assert.equal(getAccountCooldownInfo(account.id)?.reason, 'RateLimited');
         }
         if (streaming) assert.equal(data.done, 1);
