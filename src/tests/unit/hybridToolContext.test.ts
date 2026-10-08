@@ -19,6 +19,7 @@ const { app } = await import('../../api/server.js');
 const { addAccount } = await import('../../core/accounts.js');
 const { closeDatabase } = await import('../../core/database.js');
 const { listSessions } = await import('../../core/database.js');
+const { setModelContextWindow } = await import('../../core/model-registry.js');
 const { resetAllSessions, getSession } = await import('../../services/session-manager.js');
 
 addAccount('context-fixture@example.test', 'fixture-password');
@@ -37,7 +38,7 @@ interface FixtureMessage {
   tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>;
 }
 
-async function forwardedToolCycle(messages: FixtureMessage[], systems: string[] = ['', ''], toolsets: any[][] = [[], []]) {
+async function forwardedToolCycle(messages: FixtureMessage[], systems: string[] = ['', ''], toolsets: any[][] = [[], []], windows = [1000000, 1000000]) {
   resetAllSessions();
   process.env.TEST_SESSION_ID = 'tool-context-chat-1';
   const captured: any[] = [];
@@ -57,6 +58,7 @@ async function forwardedToolCycle(messages: FixtureMessage[], systems: string[] 
       messages,
     ];
     for (const [index, turn] of turns.entries()) {
+      setModelContextWindow('qwen3.7-plus', windows[index]);
       process.env.TEST_SESSION_ID = `tool-context-chat-${index + 1}`;
       const response = await app.fetch(new Request('http://localhost/v1/chat/completions', {
         method: 'POST',
@@ -222,4 +224,18 @@ test('a changed instruction hash cannot reuse a pinned chat in the stream creato
     globalThis.fetch = originalFetch;
     delete process.env.TEST_SESSION_ID;
   }
+});
+
+
+test('a cached turn does not validate or resend an unused oversized bootstrap', async () => {
+  const system = 'CACHED_SYSTEM_ONLY_SENTINEL '.repeat(2000);
+  const prompt = await forwardedToolCycle([
+    { role: 'user', content: 'Read documentation and report its settings.' },
+    { role: 'assistant', content: 'Fixture response completed.' },
+    { role: 'user', content: 'Continue the same task.' },
+  ], [system, system], [[], []], [100000, 2048]);
+  assert.ok(prompt.includes('User: Continue the same task.'));
+  assert.ok(!prompt.includes('CACHED_SYSTEM_ONLY_SENTINEL'));
+  const { countTokens } = await import('../../core/tokenizer.js');
+  assert.ok(countTokens(prompt) < 2048);
 });
