@@ -113,6 +113,13 @@ function recordDirectFetchFailure(accountId?: string): void {
   }
 }
 
+function forwardRequestAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  return () => signal?.removeEventListener('abort', onAbort);
+}
+
 /**
  * Attempts the completions POST directly from Node. Returns undefined for
  * anything that is not a clean SSE success so the caller falls back to the
@@ -129,13 +136,14 @@ async function tryDirectCompletionFetch(
   signal?: AbortSignal,
 ): Promise<{ stream: ReadableStream<Uint8Array>; controller: AbortController } | undefined> {
   const controller = new AbortController();
+  const detachAbort = forwardRequestAbort(signal, controller);
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
       body: payloadJson,
-      signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
+      signal: controller.signal,
     });
     clearTimeout(timeoutId);
 
@@ -162,6 +170,7 @@ async function tryDirectCompletionFetch(
     recordDirectFetchFailure(accountId);
     return undefined;
   } finally {
+    detachAbort();
     clearTimeout(timeoutId);
   }
 }
@@ -1087,6 +1096,7 @@ export async function createQwenStream(
     }
 
     const controller = new AbortController();
+    const detachAbort = forwardRequestAbort(options?.signal, controller);
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
@@ -1094,9 +1104,10 @@ export async function createQwenStream(
         method: 'POST',
         headers: buildNodeCompletionHeaders(chatHeaders, chatId, accountId),
         body: payloadJson,
-        signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
+        signal: controller.signal,
       });
     } finally {
+      detachAbort();
       clearTimeout(timeoutId);
     }
 
@@ -1117,6 +1128,7 @@ export async function createQwenStream(
           const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
           await sleep(500 + Math.floor(Math.random() * 1000));
           const retryController = new AbortController();
+          const detachRetryAbort = forwardRequestAbort(options?.signal, retryController);
           const retryTimeoutId = setTimeout(() => retryController.abort(), timeoutMs);
           let retryResponse: Response;
           try {
@@ -1124,9 +1136,10 @@ export async function createQwenStream(
               method: 'POST',
               headers: buildNodeCompletionHeaders(freshHeaders, chatId, accountId),
               body: payloadJson,
-              signal: options?.signal ? AbortSignal.any([retryController.signal, options.signal]) : retryController.signal,
+              signal: retryController.signal,
             });
           } finally {
+            detachRetryAbort();
             clearTimeout(retryTimeoutId);
           }
 
