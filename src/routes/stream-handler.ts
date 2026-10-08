@@ -17,6 +17,7 @@ import { updateSessionParent, markHistoryComplete, markHistoryIncomplete, fetchQ
 import { countTokens } from '../core/tokenizer.js';
 import { isTruncatedResponse } from '../utils/truncation-detector.js';
 import { config } from '../core/config.js';
+import { cancelQwenReader } from '../services/stream-lifecycle.js';
 
 async function resolveResponseError(error: QwenProviderError | undefined, content: string, toolCount: number, completionId: string, chatId: string, parentId?: string | null, signal?: AbortSignal): Promise<QwenProviderError | null> {
   if (error) return error;
@@ -125,7 +126,13 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       const entry = getStream(ctx.completionId);
       teardownEntry = entry;
       const cleanup = abortRequest ? entry?.cancel : entry?.cleanup ?? entry?.cancel;
-      const cancel = Promise.resolve().then(() => cleanup ? cleanup(reason) : r ? r.cancel(reason) : s?.cancel(reason));
+      const cancel = Promise.resolve().then(async () => {
+        if (cleanup) return cleanup(reason);
+        const reader = r ?? s?.getReader();
+        if (!reader) return;
+        try { await cancelQwenReader(reader, reason); }
+        finally { if (!r) reader.releaseLock(); }
+      });
       pendingTeardown = Promise.all([pendingTeardown, cancel]).then(() => {}, () => { teardownFailed = true; });
       return pendingTeardown;
     };
