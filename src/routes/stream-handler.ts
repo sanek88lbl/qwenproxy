@@ -114,16 +114,22 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     const clientSignal = (c.req.raw as any)?.signal as AbortSignal | undefined;
     const clientAborted = () => !!clientSignal?.aborted || !!streamWriter.aborted;
     let pendingTeardown: Promise<void> = Promise.resolve();
-    const releaseActiveStream = (reason: string) => {
+    let teardownFailed = false;
+    let teardownEntry: ReturnType<typeof getStream>;
+    const releaseActiveStream = (reason: string, abortRequest = false) => {
       const r = activeReader;
       const s = activeStream;
+      if (!r && !s) return pendingTeardown;
       activeStream = null;
       activeReader = null;
-      const cancel = r ? r.cancel(reason) : s?.cancel(reason);
-      if (cancel) pendingTeardown = Promise.all([pendingTeardown, cancel]).then(() => {}, () => {});
+      const entry = getStream(ctx.completionId);
+      teardownEntry = entry;
+      const cleanup = abortRequest ? entry?.cancel : entry?.cleanup ?? entry?.cancel;
+      const cancel = Promise.resolve().then(() => cleanup ? cleanup(reason) : r ? r.cancel(reason) : s?.cancel(reason));
+      pendingTeardown = Promise.all([pendingTeardown, cancel]).then(() => {}, () => { teardownFailed = true; });
       return pendingTeardown;
     };
-    const onClientAbort = () => { void releaseActiveStream('client aborted stream'); };
+    const onClientAbort = () => { void releaseActiveStream('client aborted stream', true); };
     streamWriter.onAbort(onClientAbort);
     if (clientSignal) {
       if (clientSignal.aborted) queueMicrotask(onClientAbort);
@@ -806,7 +812,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       await releaseActiveStream('stream teardown');
       flushWrites();
       clearInterval(heartbeatInterval);
-      removeStream(ctx.completionId);
+      if (!teardownFailed) await removeStream(ctx.completionId, teardownEntry);
       if (!succeeded) markHistoryIncomplete(ctx.uiSessionId);
       try { ctx.onUsage?.(promptTokens, completionTokens, !succeeded); }
       finally { ctx.onComplete?.(); }
@@ -907,7 +913,7 @@ export async function collectNonStreamingResult(
 
   } catch (error) {
     markHistoryIncomplete(uiSessionId);
-    removeStream(completionId);
+    await removeStream(completionId);
     completeOnce();
     throw error;
   } finally { reader.releaseLock(); }
@@ -931,7 +937,7 @@ export async function collectNonStreamingResult(
   if (providerError) {
     const accountId = getStream(completionId)?.accountId;
     markHistoryIncomplete(uiSessionId);
-    removeStream(completionId);
+    await removeStream(completionId);
     completeOnce();
     return { status: providerError.status, body: qwenErrorBody(providerError), content: '', toolCalls: [], degenerate: false, updateMember: false, overload: false, quotaLimited: providerError.dailyQuota, quotaAccountId: accountId, providerError, targetResponseId: parserState.targetResponseId };
   }
@@ -952,7 +958,7 @@ export async function collectNonStreamingResult(
 
   const quotaLimited = toolCallsOut.length === 0 && isDailyQuotaAssistantMessage(finalContent);
   const quotaAccountId = quotaLimited ? getStream(completionId)?.accountId : undefined;
-  removeStream(completionId);
+  await removeStream(completionId);
   if (quotaLimited) {
     markHistoryIncomplete(uiSessionId);
     completeOnce();
