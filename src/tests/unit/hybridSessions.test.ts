@@ -1,14 +1,27 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import assert from 'node:assert';
 
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
-// Session reconciliation is exercised by sessionReconciliation.test.ts.
 process.env.HYBRID_SESSION_VERIFY = 'false';
 
 delete process.env.API_KEY;
+delete process.env.USER_API_KEYS;
+delete process.env.AUTH_REQUIRED;
+process.env.WARM_POOL_SIZE = '0';
+process.env.BROWSER_IDLE_HIBERNATE_MS = '0';
+const originalCwd = process.cwd();
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-hybrid-')) ;
+process.chdir(directory);
 
 const { app } = await import('../../api/server.js');
 const { resetAllSessions } = await import('../../services/session-manager.js');
+const { addAccount } = await import('../../core/accounts.js');
+const { closeDatabase } = await import('../../core/database.js');
+addAccount('hybrid@example.invalid', 'fixture-password');
+after(() => { closeDatabase(); process.chdir(originalCwd); fs.rmSync(directory, { recursive: true, force: true }); });
 
 function setupFetchMock(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
   const originalFetch = globalThis.fetch;
@@ -31,7 +44,7 @@ function sseResponse(responseIds: string[]): Response {
   for (const rid of responseIds) {
     parts.push(enc.encode(`data: {"response.created":{"response_id":"${rid}"}}\n\n`));
   }
-  parts.push(enc.encode('data: {"choices":[{"delta":{"content":"Resposta completa para o teste.","phase":"answer"}}],"usage":{"output_tokens":12}}\n\n'));
+  parts.push(enc.encode('data: {"response_id":' + JSON.stringify(responseIds[0]) + ',"choices":[{"delta":{"content":"Resposta completa para o teste.","phase":"answer"}}],"usage":{"output_tokens":12}}\n\n'));
   parts.push(enc.encode('data: [DONE]\n\n'));
   let idx = 0;
   return new Response(new ReadableStream({
@@ -43,7 +56,7 @@ function sseResponse(responseIds: string[]): Response {
   }), { status: 200 });
 }
 
-test('hybrid-session: turn 2 sends only system + last user message and threads parent', async () => {
+test('hybrid-session: turn 2 sends only the new suffix and threads the confirmed parent', async () => {
   resetAllSessions();
   const capturedPayloads: any[] = [];
 
@@ -77,7 +90,7 @@ test('hybrid-session: turn 2 sends only system + last user message and threads p
         user: 'conv-hybrid-1',
         messages: [
           { role: 'user', content: 'Turn 1' },
-          { role: 'assistant', content: 'Reply 1' },
+          { role: 'assistant', content: 'Resposta completa para o teste.' },
           { role: 'user', content: 'Turn 2' }
         ]
       })
@@ -87,21 +100,19 @@ test('hybrid-session: turn 2 sends only system + last user message and threads p
     await res2.text();
 
     assert.strictEqual(capturedPayloads.length, 2);
-    // Turn 1: full bootstrap, no parent.
     assert.strictEqual(capturedPayloads[0].parent_id, null);
     assert.ok(capturedPayloads[0].messages[0].content.includes('Turn 1'), 'Turn 1 must send the full conversation');
-    // Turn 2: economical — only system + last user message, threaded on Turn 1's response id.
     assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-hyb-1', 'Turn 2 must thread on the previous response id');
     assert.ok(capturedPayloads[1].messages[0].content.includes('Turn 2'), 'Turn 2 must include the last user message');
     assert.ok(!capturedPayloads[1].messages[0].content.includes('Turn 1'), 'Turn 2 must NOT resend the full history');
-    assert.ok(!capturedPayloads[1].messages[0].content.includes('Reply 1'), 'Turn 2 must NOT resend prior assistant replies');
+    assert.ok(!capturedPayloads[1].messages[0].content.includes('Resposta completa para o teste.'), 'Turn 2 must NOT resend prior assistant replies');
   } finally {
     restore();
     delete process.env.TEST_SESSION_ID;
   }
 });
 
-test('hybrid-session: without a session key every turn sends the full conversation but still threads parent', async () => {
+test('hybrid-session: without a session key every turn bootstraps the full conversation in a new chat', async () => {
   resetAllSessions();
   const capturedPayloads: any[] = [];
 
@@ -122,6 +133,7 @@ test('hybrid-session: without a session key every turn sends the full conversati
     assert.strictEqual(res1.status, 200);
     await res1.text();
 
+    process.env.TEST_SESSION_ID = 'hybrid-full-chat-new';
     const req2 = new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -142,14 +154,14 @@ test('hybrid-session: without a session key every turn sends the full conversati
     assert.strictEqual(capturedPayloads[0].parent_id, null);
     assert.ok(capturedPayloads[1].messages[0].content.includes('A'), 'No session key means full history is always sent');
     assert.ok(capturedPayloads[1].messages[0].content.includes('C'));
-    assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-full-1', 'Parent threading works without a session key');
+    assert.strictEqual(capturedPayloads[1].parent_id, null, 'A fresh stateless chat has no previous parent');
   } finally {
     restore();
     delete process.env.TEST_SESSION_ID;
   }
 });
 
-test('hybrid-session: tools disable economical mode', async () => {
+test('hybrid-session: tools preserve economical mode with a confirmed prefix', async () => {
   resetAllSessions();
   const capturedPayloads: any[] = [];
 
@@ -185,6 +197,7 @@ test('hybrid-session: tools disable economical mode', async () => {
         tools: [toolDef],
         messages: [
           { role: 'user', content: 'T1' },
+          { role: 'assistant', content: 'Resposta completa para o teste.' },
           { role: 'assistant', content: 'R1', tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"x"}' } }] },
           { role: 'tool', tool_call_id: 'call_1', name: 'read_file', content: 'file content' },
           { role: 'user', content: 'T2' }
@@ -199,7 +212,7 @@ test('hybrid-session: tools disable economical mode', async () => {
     assert.strictEqual(capturedPayloads[1].parent_id, 'qwen-tool-1', 'must thread onto the previous response');
     const content = capturedPayloads[1].messages[0].content;
     assert.ok(!content.includes('T1'), 'tool loops now economize: pre-cycle history stays server-side');
-    assert.ok(content.includes('[tool_response read_file] file content'), 'tool responses preserved as a compact summary');
+    assert.ok(content.includes('Tool Response (read_file):') && content.includes('file content') && content.includes('call_1'), 'tool responses preserved as a compact summary');
     assert.ok(content.includes('User: T2'), 'final user message must be included');
   } finally {
     restore();
@@ -207,7 +220,7 @@ test('hybrid-session: tools disable economical mode', async () => {
   }
 });
 
-test('hybrid-session: tool responses in history disable economical mode even without tools param', async () => {
+test('hybrid-session: a new tool cycle preserves confirmed history without the tools parameter', async () => {
   resetAllSessions();
   const capturedPayloads: any[] = [];
 
@@ -219,7 +232,6 @@ test('hybrid-session: tool responses in history disable economical mode even wit
   try {
     process.env.TEST_SESSION_ID = 'hybrid-noparam-tool-chat';
 
-    // Turn 1: plain turn (establishes the session).
     const r1 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -228,8 +240,6 @@ test('hybrid-session: tool responses in history disable economical mode even wit
     assert.strictEqual(r1.status, 200);
     await r1.text();
 
-    // Turn 2: NO `tools` parameter, but the history contains tool messages.
-    // Economical mode must be disabled so the tool responses stay in context.
     const r2 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -237,6 +247,8 @@ test('hybrid-session: tool responses in history disable economical mode even wit
         model: 'qwen3.6-plus',
         user: 'conv-np-tool',
         messages: [
+          { role: 'user', content: 'T0' },
+          { role: 'assistant', content: 'Resposta completa para o teste.' },
           { role: 'user', content: 'T1' },
           { role: 'assistant', content: '', tool_calls: [{ id: 'call_9', type: 'function', function: { name: 'read_file', arguments: '{"path":"x"}' } }] },
           { role: 'tool', tool_call_id: 'call_9', name: 'read_file', content: 'file x' },
@@ -250,8 +262,9 @@ test('hybrid-session: tool responses in history disable economical mode even wit
     assert.strictEqual(capturedPayloads.length, 2);
     assert.strictEqual(capturedPayloads[1].parent_id, 'noparam-tool-1', 'must thread onto the previous response');
     const second = capturedPayloads[1].messages[0].content;
-    assert.ok(!second.includes('T1'), 'tool loops economize even without the tools param');
-    assert.ok(second.includes('[tool_response read_file] file x'), 'tool responses preserved as a compact summary');
+    assert.ok(!second.includes('T0'), 'the confirmed prefix must not be resent');
+    assert.ok(second.includes('User: T1'), 'the new user turn is part of the suffix');
+    assert.ok(second.includes('Tool Response (read_file):') && second.includes('file x') && second.includes('call_9'), 'tool responses preserved as a compact summary');
     assert.ok(second.includes('User: T2'), 'final user message must be included');
   } finally {
     restore();
@@ -279,9 +292,6 @@ test('hybrid-session: tool cycle after a text reply is economical (sends only th
     assert.strictEqual(r1.status, 200);
     await r1.text();
 
-    // Turn 2: a tool cycle AFTER a completed text reply. Economical mode must
-    // send only the trailing cycle (tool_calls + tool + final user), relying on
-    // the server-side history for everything before it.
     const r2 = await app.fetch(new Request('http://localhost/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -290,7 +300,7 @@ test('hybrid-session: tool cycle after a text reply is economical (sends only th
         user: 'conv-cycle',
         messages: [
           { role: 'user', content: 'T1' },
-          { role: 'assistant', content: 'Reply 1' },
+          { role: 'assistant', content: 'Resposta completa para o teste.' },
           { role: 'assistant', content: '', tool_calls: [{ id: 'call_2', type: 'function', function: { name: 'read_file', arguments: '{"path":"x"}' } }] },
           { role: 'tool', tool_call_id: 'call_2', name: 'read_file', content: 'file x' },
           { role: 'user', content: 'T3' }
@@ -304,8 +314,8 @@ test('hybrid-session: tool cycle after a text reply is economical (sends only th
     const second = capturedPayloads[1].messages[0].content;
     assert.strictEqual(capturedPayloads[1].parent_id, 'cyc-1', 'must thread onto the previous response');
     assert.ok(!second.includes('T1'), 'must not resend pre-cycle history');
-    assert.ok(second.includes('RECENT TOOL ACTIVITY'), 'must include the compact tool-state summary');
-    assert.ok(second.includes('[tool_response read_file]'), 'tool responses of the cycle must be summarized');
+    assert.ok(second.includes('{"path":"x"}'), 'tool arguments must be complete');
+    assert.ok(second.includes('Tool Response (read_file):') && second.includes('call_2'), 'tool responses of the cycle must be summarized');
     assert.ok(second.includes('User: T3'), 'final user message must be included');
   } finally {
     restore();
