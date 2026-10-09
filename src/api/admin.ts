@@ -10,6 +10,7 @@ import crypto from 'crypto'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { fileURLToPath } from 'node:url'
 import { config } from '../core/config.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
@@ -84,7 +85,7 @@ function clearLoginFailures(ip: string): void {
 
 function readPackageVersion(): string {
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf-8'))
+    const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'))
     return typeof pkg.version === 'string' ? pkg.version : 'unknown'
   } catch {
     return 'unknown'
@@ -774,7 +775,7 @@ adminApp.post('/api/test-chat', adminGuard, async (c) => {
 
 // --- SPA (React + shadcn build) ---------------------------------------------
 
-const WEB_DIST = path.resolve('web', 'dist')
+const WEB_DIST = path.resolve(fileURLToPath(new URL('../../web/dist/', import.meta.url)))
 
 // Dev mode (`npm run dev` passes --dev): redirect the SPA to the Vite dev server
 // so the panel always shows the latest source with HMR instead of the last build.

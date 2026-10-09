@@ -4,14 +4,14 @@ Guide for AI agents working in this repository.
 
 ## Project overview
 
-`@pedrofariasx/qwenproxy` — local OpenAI-compatible proxy that routes requests to Qwen (chat.qwen.ai) via Playwright browser automation. Node.js >= 20, TypeScript (ESM, strict), Hono HTTP server, better-sqlite3 for persistence.
+`@pedrofariasx/qwenproxy` — local OpenAI-compatible proxy that routes requests to Qwen (chat.qwen.ai) via Playwright browser automation. Node.js >= 22.13, TypeScript (ESM, strict), Hono HTTP server, better-sqlite3 for persistence.
 
 ## Essential commands
 
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Server (tsx watch) + admin web dev server concurrently |
-| `npm start` | Start proxy (builds admin web first via `prestart`) |
+| `npm start` | Start compiled proxy (run build:all first) |
 | `npm run login` | Interactive browser login to capture Qwen session |
 | `npm run build` | Compile backend (`tsc -p tsconfig.build.json` → `dist/`) |
 | `npm run build:admin` | Build admin web UI (`web/`, Vite) |
@@ -74,7 +74,7 @@ Request flow: Hono route (`routes/chat.ts`) → account selection (`core/account
 
 ## CI
 
-`.github/workflows/ci.yml` runs `npm run lint`, `npm run typecheck`, and `npm run test:unit` on Node 20 for pushes/PRs to `main`/`master`. All three must pass locally before pushing.
+`.github/workflows/ci.yml` checks lint, backend/frontend types, unit tests and the installed npm artifact on Node 22/24. Local browser fixtures run separately. All checks must pass before release; npm/Docker publication requires an explicit manual workflow dispatch on main.
 
 ## Docker
 

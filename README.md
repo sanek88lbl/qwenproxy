@@ -4,7 +4,7 @@
 
 Proxy API local compatível com OpenAI que roteia requisições para os modelos do **Qwen (chat.qwen.ai)** via automação de navegador com Playwright. Suporte a múltiplas contas com **roteamento por carga (load-aware)**, **dashboard de administração** (React + shadcn/ui), **API keys multiusuário** com cotas, sessões híbridas persistentes, execução de ferramentas, modo de pensamento (reasoning) e armazenamento em SQLite.
 
-[![CI](https://github.com/pedrofariasx/qwenproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/pedrofariasx/qwenproxy/actions/workflows/ci.yml)
+[![CI](https://github.com/sanek88lbl/qwenproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/sanek88lbl/qwenproxy/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue)](https://www.typescriptlang.org/)
 [![Hono](https://img.shields.io/badge/Hono-4.12-green)](https://hono.dev/)
 [![Playwright](https://img.shields.io/badge/Playwright-1.60-blueviolet)](https://playwright.dev/)
@@ -67,7 +67,7 @@ graph TD
 
 | Dependência       | Versão Mínima | Instalação                                         |
 | ----------------- | ------------- | -------------------------------------------------- |
-| Node.js           | v20.x         | [nvm](https://github.com/nvm-sh/nvm)               |
+| Node.js           | >=22.13.0     | [nvm](https://github.com/nvm-sh/nvm)               |
 | npm               | v9.x          | Incluído com Node.js                               |
 | Playwright        | -             | `npx playwright install`                           |
 | Docker (opcional) | v24.x         | [Docker Docs](https://docs.docker.com/get-docker/) |
@@ -231,10 +231,7 @@ curl http://localhost:3000/v1/chat/completions \
 ## Sessões híbridas (economia de contexto) e upload de arquivos .txt
 
 Para conversas longas o proxy usa a **estrutura híbrida**: a primeira mensagem de
-uma conversa envia o histórico completo (bootstrap); a partir daí, apenas o
-`system` + a última mensagem do usuário são enviados, aproveitando o histórico
-que o Qwen mantém do lado do servidor para o mesmo `chat_id` (com threading via
-`parent_id`).
+uma conversa envia o histórico completo (bootstrap). Depois de confirmar o prefixo do histórico do cliente, apenas as mensagens novas são enviadas ao mesmo `chat_id`, com `parent_id`. Instruções inalteradas não são reenviadas.
 
 Para ativar, informe a mesma chave de sessão em todas as mensagens da conversa,
 usando o campo OpenAI `user` (ou o header `x-qwen-session`):
@@ -254,12 +251,9 @@ console.log(completion.session_id);
 ```
 
 - **Turno 1** de uma sessão: `parent_id = null`, histórico completo enviado.
-- **Turnos seguintes**: apenas `User: <última mensagem>` com `parent_id` apontando
-  para a última resposta, o que reduz drasticamente os tokens enviados.
-- Sem chave de sessão o proxy mantém o comportamento original (envia o histórico
-  completo, mas ainda encadeia as mensagens com `parent_id`).
-- Quando a conversa envolve `tools` ou multimodal, o modo econômico é desativado
-  automaticamente e o histórico completo é sempre enviado.
+- **Turnos seguintes**: o cliente envia o histórico completo; após conferir o prefixo confirmado, o proxy encaminha somente o sufixo novo com o parent confirmado. Edições do prefixo exigem novo bootstrap.
+- Sem chave de sessão, o histórico completo é enviado.
+- Ferramentas permitem reuse quando o prefixo confere; entrada multimodal usa bootstrap.
 
 **Arquivos de texto (.txt/.md/.csv/...)** enviados pelo usuário ou prompts
 grandes são **embutidos no texto da mensagem** (para o modelo sempre ver o
@@ -545,3 +539,22 @@ Os autores não incentivam ou endossam:
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=pedrofariasx/qwenproxy&type=date&legend=bottom-right" />
  </picture>
 </a>
+
+
+## Разработка нашего форка
+
+Исходники: https://github.com/sanek88lbl/qwenproxy. Для работы сервера нужен Node ≥22.13.0. CI проверяет Node 22 и 24; инструменты публикации запускаются на Node 24.
+
+Установка зависимостей: `npm ci` и `npm --prefix web ci`. Перед `npm start` из исходников выполнить `npm run build:all`; установленный npm-пакет запускает готовый CLI без tsx и исходников. Проверки: `npm run lint`, `npm run typecheck`, `npm run typecheck:admin`, `npm run test:unit`. Команда `npm run verify:package` собирает backend и панель, проверяет состав tarball, устанавливает его с production-зависимостями во временный каталог и проверяет CLI, HTTP health, панель и создание новой БД. В этом smoke инициализация Qwen подменена фикстурой; настоящая авторизация не проверяется. Обычный `npm pack` также выполняет проверки типов и сборку через `prepack`. Сборка backend очищает прежний `dist`.
+
+Push и PR запускают проверки. Публикация npm/Docker возможна только отдельным ручным запуском workflow на `main` с `publish_release=true` и настроенными секретами выпуска. Имя npm-пакета пока сохранено от исходного проекта; перед отдельным выпуском форка требуется определить собственное имя и права публикации.
+
+### История и параллельные запросы
+
+Клиент передаёт полную актуальную историю и сохраняет один идентификатор разговора в `user`, `x-qwen-session` или `x-session-id`. Прокси сверяет сохранённый префикс, включая последний выданный ответ и вызовы инструментов. При совпадении отправляется только новый суффикс. Изменение, удаление, перестановка прежних сообщений или отсутствие доказанного префикса вызывает bootstrap текущей истории. Отправка только нового сообщения без предыдущей истории не подтверждает возможность reuse.
+
+Для сравнения `null` и пустой текст нормализуются; служебные поля клиента, reasoning и индексы tool calls не участвуют. Текст, порядок сообщений, ID/имена инструментов, ссылки на результаты и строки аргументов сохраняются. Пробелы внутри строки аргументов значимы; порядок ключей JSON-объекта незначим. Отпечаток URL не обнаруживает изменение удалённого файла по прежнему адресу. Локальная сверка действует и при `HYBRID_SESSION_VERIFY=false`.
+
+Запросы одного владельца к одной сессии выполняются последовательно: резерв пользователя → lease сессии → слот аккаунта. Lease сохраняется до подтверждения результата и очистки транспорта, включая внутренние повторы и continuation. Отмена удаляет ожидающий запрос из очереди. Разные сессии могут работать параллельно в пределах настроенных квот. При неподтверждённой очистке запись потока и резервы сохраняются для повторной остановки/watchdog.
+
+`HYBRID_SESSIONS_ENABLED=false` отключает reuse между запросами; внутренний continuation одного запроса может продолжать его текущий чат. `QWEN_GUEST_MODE_ONLY=true` пропускает вход в настроенные аккаунты при старте и выбирает гостевой путь без удаления аккаунтов. CLI имеет приоритет над окружением для port/browser; импорт точки входа сервер не запускает.

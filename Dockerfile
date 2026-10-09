@@ -10,6 +10,7 @@ RUN npm ci && npm cache clean --force
 
 COPY tsconfig.json tsconfig.build.json ./
 COPY src/ ./src/
+COPY bin/ ./bin/
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
 RUN npm run build && npm prune --omit=dev
