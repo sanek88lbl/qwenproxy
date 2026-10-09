@@ -3,6 +3,10 @@ FROM mcr.microsoft.com/playwright:v1.60.0-noble
 RUN apt-get update && apt-get install -y --no-install-recommends dumb-init gosu \
     && rm -rf /var/lib/apt/lists/*
 
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/sanek88lbl/qwenproxy" \
+      org.opencontainers.image.revision=$VCS_REF
+
 WORKDIR /app
 
 COPY package*.json ./
@@ -18,7 +22,7 @@ RUN npm run build && npm prune --omit=dev
 COPY web/package.json web/package-lock.json web/
 RUN npm --prefix web ci
 COPY web/ web/
-RUN npm --prefix web run build && rm -rf web/node_modules
+RUN npm --prefix web run typecheck && npm --prefix web run build && rm -rf web/node_modules
 
 RUN mkdir -p /app/data /app/qwen_profiles /tmp/playwright \
     && chown -R pwuser:pwuser /app /tmp/playwright \
