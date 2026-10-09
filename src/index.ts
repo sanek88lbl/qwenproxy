@@ -1,23 +1,25 @@
 import 'dotenv/config'
-import { startServer, serverPort, type ServerOverrides } from './api/server.js'
-import { tuiCommand } from './cli/commands/tui.js'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { Command } from 'commander'
+import { addServerOptions, primeStartupEnvironment, serverOverridesFromOptions, type StartupOverrides } from './cli/server-options.js'
 
-export async function run(overrides?: ServerOverrides): Promise<void> {
-  startServer({ ...overrides, quiet: true }).catch(console.error)
+let running: Promise<void> | undefined
 
-  await new Promise<void>(resolve => {
-    const check = setInterval(() => {
-      if (serverPort > 0) {
-        clearInterval(check)
-        resolve()
-      }
-    }, 50)
-  })
-
-  await tuiCommand({ port: serverPort }).catch(console.error)
+export function run(overrides?: StartupOverrides): Promise<void> {
+  return running ??= (async () => {
+    primeStartupEnvironment(overrides)
+    const server = await import('./api/server.js')
+    await server.startServer({ ...overrides, quiet: overrides?.quiet ?? Boolean(process.stdin.isTTY && process.stdout.isTTY) })
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const { tuiCommand } = await import('./cli/commands/tui.js')
+      await tuiCommand({ port: server.serverPort }).catch(console.error)
+    }
+  })().catch(error => { running = undefined; throw error })
 }
 
-run().catch(error => {
-  console.error('Failed to start:', error)
-  process.exit(1)
-})
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  const program = addServerOptions(new Command().name('qwenproxy'))
+  program.action(async () => { await run(serverOverridesFromOptions(program.opts())) })
+  program.parseAsync().catch(error => { console.error('Failed to start:', error); process.exit(1) })
+}

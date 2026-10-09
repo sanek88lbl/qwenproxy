@@ -3,6 +3,7 @@ import { Command } from 'commander'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { readFileSync } from 'fs'
+import { addServerOptions, serverOverridesFromOptions } from '../dist/cli/server-options.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const pkgPath = path.resolve(__dirname, '..', 'package.json')
@@ -14,12 +15,11 @@ program
   .name('qwenproxy')
   .description('QwenProxy CLI - OpenAI-compatible proxy for Qwen')
   .version(pkg.version)
-  .option('--port <port>', 'Port to run the server on')
-  .option('--browser <browser>', 'Browser to use (chromium or firefox)')
   .option('--config <path>', 'Path to config file')
   .option('--verbose', 'Enable verbose output')
-  .option('--quiet', 'Suppress startup banner')
   .option('--json', 'Output in JSON format')
+
+addServerOptions(program)
 
 program
   .command('status')
@@ -90,10 +90,7 @@ program
 program
   .action(async () => {
     const opts = program.opts()
-    const overrides = {}
-    if (opts.port) overrides.port = parseInt(opts.port, 10)
-    if (opts.browser) overrides.browser = opts.browser
-    if (opts.quiet) overrides.quiet = true
+    const overrides = serverOverridesFromOptions(opts)
 
     const script = path.join(__dirname, '..', 'dist', 'index.js')
     const mod = await import(script)
@@ -102,4 +99,7 @@ program
     }
   })
 
-program.parse()
+program.parseAsync().catch(error => {
+  console.error('Failed to start:', error)
+  process.exit(1)
+})

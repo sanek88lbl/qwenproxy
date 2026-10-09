@@ -356,6 +356,7 @@ export async function chatCompletions(c: Context) {
       (lastMsg?.role === 'tool' || lastMsg?.role === 'function');
 
     let canEconomize = !!(
+      config.hybridSessions.enabled &&
       session?.historyComplete &&
       session.instructionsHash === instructionsHash &&
       session.accountId !== 'guest' &&
@@ -406,7 +407,7 @@ export async function chatCompletions(c: Context) {
     if (clientSignal.aborted) onClientAbort();
     const baseStreamOptions = { sessionKey, sessionOwner: principal, economicalPrompt, prepareBootstrap, instructionsHash, signal: requestController.signal };
 
-    const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', false);
+    const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly);
     const completionId = 'chatcmpl-' + crypto.randomUUID();
     activeCompletionId = completionId;
     const stopToken = crypto.randomUUID();

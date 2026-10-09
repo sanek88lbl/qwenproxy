@@ -265,17 +265,17 @@ export async function clearPageRuntimeState(page: Page | null): Promise<void> {
   }
 }
 
-export async function getOrLaunchBrowser(browserType: BrowserType = 'chromium'): Promise<Browser> {
+export async function getOrLaunchBrowser(browserType: BrowserType = config.browser.type): Promise<Browser> {
   if (browser?.isConnected()) return browser;
   const { engine, channel } = resolveBrowserEngine(browserType);
   console.log(`[Playwright] Launching shared ${browserType} browser...`);
 
-  const launchArgs = getBrowserLaunchArgs();
+  const launchArgs = engine === chromium ? getBrowserLaunchArgs() : [];
 
   browser = await engine.launch({
     headless: config.browser.headless,
     channel,
-    ignoreDefaultArgs: ['--enable-automation', '--enable-blink-features'],
+    ignoreDefaultArgs: engine === chromium ? ['--enable-automation', '--enable-blink-features'] : [],
     args: launchArgs,
   });
   browser.on('disconnected', () => {
@@ -576,7 +576,7 @@ export async function resetBrowserProfile(cacheKey: string, accountId?: string):
   }
 }
 
-export async function initPlaywright(_headless = true, browserType: BrowserType = 'chromium') {
+export async function initPlaywright(_headless = true, browserType: BrowserType = config.browser.type) {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
   if (context) {
     return;
@@ -656,7 +656,7 @@ export async function dismissAgeModal(page: Page): Promise<void> {
   } catch { /* ignore */ }
 }
 
-export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = 'chromium') {
+export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = config.browser.type) {
   const priorContext = accountContexts.get(account.id);
   if (priorContext) {
     await priorContext.close().catch(() => {});
@@ -742,14 +742,14 @@ export async function initPlaywrightForAccount(account: QwenAccount, _headless =
   }
 }
 
-export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = 'chromium'): Promise<{ context: BrowserContext, page: Page }> {
+export async function launchManualLoginAccount(accountId: string, browserType: BrowserType = config.browser.type): Promise<{ context: BrowserContext, page: Page }> {
   const { engine, channel } = resolveBrowserEngine(browserType);
 
   const manualBrowser = await engine.launch({
     headless: false,
     channel,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: getBrowserLaunchArgs(),
+    ignoreDefaultArgs: engine === chromium ? ['--enable-automation'] : [],
+    args: engine === chromium ? getBrowserLaunchArgs() : [],
   });
 
   const storageState = loadStorageState(accountId);

@@ -4,7 +4,8 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
 import { serve, type ServerType } from '@hono/node-server'
-import { config } from '../core/config.js'
+import { config, applyStartupOverrides } from '../core/config.js'
+import { getRuntimeBool } from '../core/runtime-config.js'
 import { sleep } from '../utils/sleep.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
@@ -129,30 +130,27 @@ export interface ServerOverrides {
 export let serverPort = 0
 export let accountCount = 0
 
-export async function startServer(overrides?: ServerOverrides): Promise<void> {
-  if (overrides?.port != null) {
-    process.env.PORT = String(overrides.port)
-  }
-  if (overrides?.browser != null) {
-    process.env.BROWSER = overrides.browser
-  }
+async function initializeServer(overrides?: ServerOverrides): Promise<void> {
+  applyStartupOverrides(overrides)
   await cache.connect()
 
   const { loadAccounts } = await import('../core/accounts.js')
   const accounts = loadAccounts()
   accountCount = accounts.length
+  let warmAccounts = accounts.slice(0, 0)
+  const guestOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly)
 
   if (!overrides?.quiet) {
     console.log(renderBanner({
-      port: overrides?.port ?? Number(process.env.PORT || 3000),
-      browser: overrides?.browser || process.env.BROWSER || 'chromium',
+      port: config.server.port,
+      browser: config.browser.type,
       accountCount,
     }))
   }
 
   const { initPlaywright, initPlaywrightForAccount } = await import('../services/playwright.js')
 
-  if (accounts.length > 0) {
+  if (accounts.length > 0 && !guestOnly) {
     const now = Date.now()
     let activeAccounts = accounts.filter(account => !account.cooldown_until || account.cooldown_until <= now)
     let cooldownAccounts = accounts.filter(account => account.cooldown_until && account.cooldown_until > now)
@@ -190,16 +188,41 @@ export async function startServer(overrides?: ServerOverrides): Promise<void> {
       const stagger = i === 0 ? 0 : randomDelay(config.accounts.initStaggerMinMs, config.accounts.initStaggerMaxMs)
       if (stagger > 0) await sleep(stagger)
       try {
-        await initPlaywrightForAccount({ ...creds, id: account.id, email: account.email }, config.browser.headless)
+        await initPlaywrightForAccount({ ...creds, id: account.id, email: account.email }, config.browser.headless, config.browser.type)
         if (!overrides?.quiet) console.log(`${chalk.green('●')} [Account] ${account.email} → ${chalk.green('Online')}`)
       } catch (err: any) {
         console.error(`${chalk.red('●')} [Account] ${account.email} → ${chalk.red('Offline')} (${err.message})`)
       }
     })
+    warmAccounts = activeAccounts
+  } else if (!guestOnly) {
+    await initPlaywright(config.browser.headless, config.browser.type)
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error)
+    server = serve({ fetch: app.fetch, port: config.server.port, hostname: config.server.host }, info => {
+      server?.removeListener('error', onError)
+      serverPort = info.port
+      console.log(`Server listening on http://${info.address}:${info.port}`)
+      resolve()
+    })
+    server.once('error', onError)
+  })
+  process.once('SIGINT', onSigint)
+  process.once('SIGTERM', onSigterm)
+  const { startSessionKeeper } = await import('../services/session-keeper.js')
+  startSessionKeeper()
+  watchdog = new Watchdog()
+  watchdog.start()
+  metrics.startCollection()
+  const { startTimeSeriesSampling } = await import('../core/time-series.js')
+  startTimeSeriesSampling()
+  if (warmAccounts.length) {
     if (config.precapture.headersStartup) {
-      console.log(`[Server] Pre-capturing Qwen headers for ${activeAccounts.length} active account(s) with concurrency ${config.precapture.concurrency}...`)
+      console.log(`[Server] Pre-capturing Qwen headers for ${warmAccounts.length} active account(s) with concurrency ${config.precapture.concurrency}...`)
       const { getQwenHeaders } = await import('../services/playwright.js')
-      runWithConcurrency(activeAccounts, config.precapture.concurrency, async (account, i) => {
+      runWithConcurrency(warmAccounts, config.precapture.concurrency, async (account, i) => {
         const stagger = i === 0 ? 0 : randomDelay(config.precapture.staggerMinMs, config.precapture.staggerMaxMs)
         if (stagger > 0) await sleep(stagger)
         try {
@@ -210,55 +233,68 @@ export async function startServer(overrides?: ServerOverrides): Promise<void> {
       }).catch(() => {})
     }
     if (config.warmPool.startup) {
-      console.log(`[Server] Pre-fetching warm chats for ${activeAccounts.length} active account(s) in background...`)
+      console.log(`[Server] Pre-fetching warm chats for ${warmAccounts.length} active account(s) in background...`)
       const { warmAllPools } = await import('../services/qwen.js')
-      warmAllPools(activeAccounts.map(a => a.id)).catch(() => {})
+      warmAllPools(warmAccounts.map(a => a.id)).catch(() => {})
     }
-  } else {
-    await initPlaywright(config.browser.headless)
   }
+}
 
-  const { startSessionKeeper } = await import('../services/session-keeper.js')
-  startSessionKeeper()
-
-  watchdog = new Watchdog()
-  watchdog.start()
-
-  metrics.startCollection()
-  const { startTimeSeriesSampling, stopTimeSeriesSampling } = await import('../core/time-series.js')
-  startTimeSeriesSampling()
-
-  server = serve({
-    fetch: app.fetch,
-    port: config.server.port,
-    hostname: config.server.host,
-  }, (info) => {
-    serverPort = info.port
-    console.log(`Server listening on http://${info.address}:${info.port}`)
-  })
-
-  const shutdown = async (signal: string) => {
-    console.log(`Received ${signal}, shutting down gracefully...`)
-    const { stopSessionKeeper } = await import('../services/session-keeper.js')
-    stopSessionKeeper()
-    watchdog.stop()
-    stopTimeSeriesSampling()
-    metrics.stopCollection()
-    await cache.close()
+async function disposeServer(): Promise<void> {
+  process.removeListener('SIGINT', onSigint)
+  process.removeListener('SIGTERM', onSigterm)
+  const { stopSessionKeeper } = await import('../services/session-keeper.js')
+  const { stopTimeSeriesSampling } = await import('../core/time-series.js')
+  stopSessionKeeper()
+  watchdog?.stop()
+  metrics.stopCollection()
+  stopTimeSeriesSampling()
+  const current = server
+  server = undefined
+  if (current) {
+    await new Promise<void>(resolve => {
+      const timeout = setTimeout(() => {
+        if ('closeAllConnections' in current) current.closeAllConnections()
+        resolve()
+      }, 5000)
+      timeout.unref()
+      current.close(() => { clearTimeout(timeout); resolve() })
+    })
+  }
+  try {
     const { closePlaywright } = await import('../services/playwright.js')
     await closePlaywright()
-    const { closeDatabase } = await import('../core/database.js')
-    closeDatabase()
-    await new Promise<void>(resolve => {
-      if (!server) return resolve()
-      server.close(() => resolve())
-      setTimeout(() => resolve(), 5000).unref()
-    })
-    process.exit(0)
+  } finally {
+    try { await cache.close() } finally {
+      try {
+        const { closeDatabase } = await import('../core/database.js')
+        closeDatabase()
+      } finally { serverPort = 0 }
+    }
   }
-
-  process.on('SIGINT', () => shutdown('SIGINT'))
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
 }
+
+let starting: Promise<void> | undefined
+let stopping: Promise<void> | undefined
+
+export function startServer(overrides?: ServerOverrides): Promise<void> {
+  return starting ??= initializeServer(overrides).catch(async error => {
+    try { await disposeServer() } catch (cleanupError) {
+      console.error('Startup cleanup failed:', cleanupError)
+    } finally { starting = undefined }
+    throw error
+  })
+}
+
+async function shutdown(signal: string): Promise<void> {
+  console.log(`Received ${signal}, shutting down gracefully...`)
+  return stopping ??= disposeServer().then(() => process.exit(0), error => {
+    console.error('Shutdown failed:', error)
+    process.exit(1)
+  })
+}
+
+function onSigint(): void { void shutdown('SIGINT') }
+function onSigterm(): void { void shutdown('SIGTERM') }
 
 export { app }

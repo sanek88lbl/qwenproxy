@@ -575,6 +575,7 @@ export async function createQwenStream(
   const session = sessionKey && !options?.forceBootstrap ? getSession(sessionKey) : undefined;
 
   const useEconomical = !!(
+    config.hybridSessions.enabled &&
     sessionKey &&
     session?.historyComplete &&
     session.instructionsHash === options?.instructionsHash &&

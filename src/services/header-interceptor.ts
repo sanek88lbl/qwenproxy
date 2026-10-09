@@ -113,7 +113,7 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
 
   let guestPage = getGuestPage();
   if (!guestPage) {
-    const sharedBrowser = await getOrLaunchBrowser('chromium');
+    const sharedBrowser = await getOrLaunchBrowser();
     const storageState = loadStorageState('_guest');
     const guestProfile = getFingerprintProfile('_guest');
     const guestCtx = await sharedBrowser.newContext({

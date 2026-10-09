@@ -14,7 +14,7 @@ const envBool = (defaultTrue: boolean) =>
   )
 
 const envSchema = z.object({
-  PORT: envInt(3000, 1),
+  PORT: envInt(3000, 1).refine(value => value <= 65535),
   HOST: z.string().default('0.0.0.0'),
   HEADLESS: envBool(true),
   BROWSER: z.enum(['chromium', 'firefox', 'webkit', 'chrome', 'edge']).default('chromium'),
@@ -47,6 +47,7 @@ const envSchema = z.object({
   QWEN_HTTP_ENDPOINT: z.string().default('https://api.qwen.ai/v1/chat'),
   QWEN_API_KEY: z.string().default(''),
   API_KEY: z.string().default(''),
+  QWEN_GUEST_MODE_ONLY: envBool(false),
   HEADERS_TTL_MS: envInt(1800000, 1),
   BACKGROUND_HEADER_REFRESH: envBool(true),
   WARM_POOL_SIZE: envInt(3),
@@ -150,6 +151,7 @@ export const config = {
     },
   },
   apiKey: env.API_KEY,
+  guestModeOnly: env.QWEN_GUEST_MODE_ONLY,
   qwen: {
     baseUrl: env.QWEN_BASE_URL,
     httpEndpoint: env.QWEN_HTTP_ENDPOINT,
@@ -212,3 +214,11 @@ export const config = {
 }
 
 export type Config = typeof config
+
+
+export function applyStartupOverrides(overrides: { port?: number; browser?: string } = {}): void {
+  const port = envSchema.shape.PORT.parse(String(overrides.port ?? config.server.port))
+  const browser = envSchema.shape.BROWSER.parse(overrides.browser ?? config.browser.type)
+  config.server.port = port
+  config.browser.type = browser
+}
