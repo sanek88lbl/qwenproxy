@@ -74,30 +74,29 @@ graph TD
 
 ---
 
-## Instalação
+## Установка форка
 
-### Via npm (Global)
-
-```bash
-npm install -g @pedrofariasx/qwenproxy
-npx playwright install
-qwenproxy
-```
-
-### Via npm (Local)
+### Из исходников
 
 ```bash
-git clone https://github.com/pedrofariasx/qwenproxy.git
+git clone https://github.com/sanek88lbl/qwenproxy.git
 cd qwenproxy
-npm install
+npm ci
+npm --prefix web ci
 npx playwright install
+npm run build:all
+npm start
 ```
 
-### Via Docker
+Для глобальной установки можно собрать локальный tarball командой `npm pack` и установить полученный файл через `npm install -g /path/to/package.tgz`. Команда `qwenproxy` запускает собранный сервер. Отдельного опубликованного npm-пакета форка пока нет; имя в package.json сохранено от исходного проекта.
+
+### Docker
 
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
+
+Compose собирает исходники текущего checkout и сохраняет БД и профили в отдельных томах. Оригинальный проект: https://github.com/pedrofariasx/qwenproxy.
 
 ---
 
@@ -353,8 +352,8 @@ Uma versão anterior ignora a proteção de proprietário. O rollback precisa co
 
 | Provedor | Botão | Observações |
 | --- | --- | --- |
-| **Render** (recomendado) | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/pedrofariasx/qwenproxy) | Docker + disk persistente (1GB) configurados via `render.yaml`. Plano free com sleep — acorde via healthcheck. |
-| **Railway** | [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://github.com/pedrofariasx/qwenproxy) | Detecta o `Dockerfile` automaticamente. **Crie um Volume** e monte em `/app/data` (perfis em `USER_DATA_DIR=/app/data/qwen_profiles`) para não perder sessões. |
+| **Render** (recomendado) | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/sanek88lbl/qwenproxy) | Docker + disk persistente (1GB) configurados via `render.yaml`. Plano free com sleep — acorde via healthcheck. |
+| **Railway** | [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://github.com/sanek88lbl/qwenproxy) | Detecta o `Dockerfile` automaticamente. **Crie um Volume** e monte em `/app/data` (perfis em `USER_DATA_DIR=/app/data/qwen_profiles`) para não perder sessões. |
 
 ### Passos comuns após o deploy
 
