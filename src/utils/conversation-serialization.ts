@@ -34,7 +34,7 @@ export class ConversationContextError extends Error {
 
 export function prepareConversationMessage(message: ConversationMessage): PreparedMessage {
   const text: string[] = [];
-  const media: ConversationMedia[] = [];
+  const media: ConversationMedia[] = [...(message.media ?? [])];
   const content = message.content;
   if (Array.isArray(content)) {
     for (const part of content) {

@@ -113,3 +113,16 @@ for (const streaming of [false, true]) {
     } finally { globalThis.fetch = nativeFetch; }
   });
 }
+
+test('history normalization preserves media and argument bytes while ignoring service fields', async () => {
+  const { historyFingerprint } = await import('../../services/client-history.js');
+  const first: any[] = [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/first.png' } }] }];
+  const second = structuredClone(first);
+  second[0].content[0].image_url.url = 'https://example.com/second.png';
+  assert.notEqual(historyFingerprint(first), historyFingerprint(second));
+  assert.equal(historyFingerprint([{ role: 'assistant', content: null }]), historyFingerprint([{ role: 'assistant', content: '', reasoning_content: 'service-only' } as any]));
+  const tool = { role: 'assistant', content: '', tool_calls: [{ id: 'call', type: 'function', function: { name: 'read', arguments: '{"path": "a"}' } }] };
+  const changed = structuredClone(tool);
+  changed.tool_calls[0].function.arguments = '{"path":"a"}';
+  assert.notEqual(historyFingerprint([tool]), historyFingerprint([changed]));
+});

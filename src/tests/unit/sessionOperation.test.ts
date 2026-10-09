@@ -74,3 +74,36 @@ test('independent sessions can send while another session is waiting for a respo
 test('disconnect removes a queued request without sending or stranding the session', () => scenario(false, true));
 
 test('SSE requests hold the same session until response confirmation and cleanup', () => scenario(false, false, true));
+
+test('multiple queued operations preserve FIFO order after cancellation and repeated release', async () => {
+  const { acquireSessionLease } = await import('../../services/session-operation.js');
+  const first = await acquireSessionLease('fifo-fixture');
+  const abort = new AbortController();
+  const cancelled = acquireSessionLease('fifo-fixture', abort.signal);
+  const third = acquireSessionLease('fifo-fixture');
+  let fourthGranted = false;
+  const fourth = acquireSessionLease('fifo-fixture').then(lease => { fourthGranted = true; return lease; });
+  abort.abort(new Error('cancel middle waiter'));
+  await assert.rejects(cancelled, /cancel middle waiter/);
+  first.release();
+  const thirdLease = await third;
+  first.release();
+  await sleep(20);
+  assert.equal(fourthGranted, false);
+  thirdLease.release();
+  (await fourth).release();
+  (await acquireSessionLease('fifo-fixture')).release();
+});
+
+test('cancellation during account-slot wait does not allocate or strand a slot', async () => {
+  const { acquireAccountStreamSlot, getAccountActiveLoad } = await import('../../core/account-manager.js');
+  const first = await acquireAccountStreamSlot('queue-account-fixture', 1000);
+  const second = await acquireAccountStreamSlot('queue-account-fixture', 1000);
+  const abort = new AbortController();
+  const waiting = acquireAccountStreamSlot('queue-account-fixture', 1000, abort.signal);
+  abort.abort(new Error('cancel account waiter'));
+  await assert.rejects(waiting, /cancel account waiter/);
+  assert.equal(getAccountActiveLoad('queue-account-fixture'), 2);
+  first.release(); second.release();
+  assert.equal(getAccountActiveLoad('queue-account-fixture'), 0);
+});
