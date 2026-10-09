@@ -207,3 +207,21 @@ for (const stage of ['init-script', 'new-page', 'storage', 'navigation', 'reject
     }
   });
 }
+
+test('guest-only mode suppresses background account recovery without deleting accounts', async () => {
+  const { applyRuntimeSetting } = await import('../../core/runtime-config.js');
+  const { loadAccounts } = await import('../../core/accounts.js');
+  const before = loadAccounts().map(entry => entry.id);
+  const previous = config.guestModeOnly;
+  let attempts = 0;
+  markAccountNotReady(account.id);
+  try {
+    config.guestModeOnly = true;
+    await recoverUnreadyAccounts(async () => { attempts++; });
+    assert.equal(attempts, 0);
+    assert.deepEqual(loadAccounts().map(entry => entry.id), before);
+    applyRuntimeSetting('QWEN_GUEST_MODE_ONLY', 'false');
+    await recoverUnreadyAccounts(async () => { attempts++; });
+    assert.ok(attempts > 0);
+  } finally { config.guestModeOnly = previous; applyRuntimeSetting('QWEN_GUEST_MODE_ONLY', null); }
+});

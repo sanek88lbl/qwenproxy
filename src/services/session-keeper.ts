@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import { accountPages, getPageForAccount, getUiMutex, getBrowser, sleep } from './browser-manager.js';
 import { humanMouseMove, humanScroll, humanDelay } from './human-behavior.js';
 import { config } from '../core/config.js';
+import { getRuntimeBool } from '../core/runtime-config.js';
 import { isMouseLocked } from './mouse-lock.js';
 import { getAccountCredentials } from '../core/accounts.js';
 import type { QwenAccount } from '../core/accounts.js';
@@ -27,10 +28,11 @@ export async function recoverUnreadyAccounts(
     await getQwenHeaders(true, account.id);
   },
 ): Promise<void> {
-  if (recoveryInProgress || isMouseLocked()) return;
+  if (recoveryInProgress || isMouseLocked() || getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly)) return;
   recoveryInProgress = true;
   try {
     for (const account of getAccountsWithCooldownSync()) {
+      if (getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly)) return;
       if (isAccountReady(account.id) || getInUseAccounts().includes(account.id) || getAccountActiveLoad(account.id) > 0 || getAccountCooldownInfo(account.id) || getUiMutex(account.id).isLocked()) continue;
       try {
         await prepare(account);
@@ -110,7 +112,7 @@ export function startSessionKeeper(): void {
   recoveryInterval.unref();
 
   intervalId = setInterval(async () => {
-    if (!running) return;
+    if (!running || getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly)) return;
 
     if (isMouseLocked()) {
       return;
