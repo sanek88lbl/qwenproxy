@@ -46,6 +46,7 @@ export interface Message {
 // --- Request Types ---
 
 export interface OpenAIRequest {
+  user?: string;
   model: string;
   messages: Message[];
   stream?: boolean;

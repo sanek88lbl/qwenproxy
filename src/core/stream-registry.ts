@@ -11,6 +11,7 @@ export interface StreamRegistryEntry {
   createdAt: number;
   cancel?: (reason?: unknown) => Promise<void>;
   cleanup?: (reason?: unknown) => Promise<void>;
+  onRemoved?: () => void;
 }
 
 const activeStreams = new Map<string, StreamRegistryEntry>();
@@ -67,6 +68,7 @@ export async function removeStream(key: string, expected?: StreamRegistryEntry):
     if (activeStreams.get(key) !== entry) return false;
   }
   activeStreams.delete(key)
+  entry?.onRemoved?.()
   updateStreamGauges()
   return true;
 }

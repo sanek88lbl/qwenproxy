@@ -308,12 +308,13 @@ export interface AccountStreamSlot {
   touch: () => void
 }
 
-export async function acquireAccountStreamSlot(accountId: string, timeoutMs: number): Promise<AccountStreamSlot> {
+export async function acquireAccountStreamSlot(accountId: string, timeoutMs: number, signal?: AbortSignal): Promise<AccountStreamSlot> {
   const base = getBaseAccountId(accountId) || accountId
   const limit = Math.max(1, getRuntimeInt('ACCOUNT_MAX_CONCURRENT_STREAMS', config.accounts.maxStreamsPerAccount))
   const waitStart = Date.now()
 
   for (;;) {
+    signal?.throwIfAborted()
     const load = accountLoad.get(base)?.length ?? 0
     if (load < limit) {
       const slotId = markAccountStreamStart(base)
@@ -340,11 +341,23 @@ export async function acquireAccountStreamSlot(accountId: string, timeoutMs: num
     }
 
     const freed = onAccountFreed()
-    await Promise.race([
-      new Promise(r => setTimeout(r, 500)),
-      freed.promise,
-    ])
-    freed.cancel()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onAbort: (() => void) | undefined
+    try {
+      await Promise.race([
+        new Promise(resolve => { timer = setTimeout(resolve, 500) }),
+        freed.promise,
+        new Promise((_, reject) => {
+          onAbort = () => reject(signal?.reason ?? new Error('Account slot wait aborted'))
+          signal?.addEventListener('abort', onAbort, { once: true })
+          if (signal?.aborted) onAbort()
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+      if (onAbort) signal?.removeEventListener('abort', onAbort)
+      freed.cancel()
+    }
   }
 }
 

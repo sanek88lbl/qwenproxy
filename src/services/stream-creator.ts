@@ -1,3 +1,4 @@
+import { acquireSessionLease, assertSessionLease, type SessionLease } from './session-operation.js';
 import { getQwenHeaders, getGuestHeaders, getPageForAccount, waitForAccountPage, browserStreamFetch } from './playwright.js';
 import { MAX_PAYLOAD_SIZE } from '../core/model-registry.js';
 import { config } from '../core/config.js';
@@ -263,20 +264,6 @@ export interface QwenFileEntry {
   url: string;
   name: string;
   [key: string]: any;
-}
-
-const sessionBusy = new Set<string>();
-
-function isSessionBusy(sessionKey: string): boolean {
-  return sessionBusy.has(sessionKey);
-}
-
-function markSessionBusy(sessionKey: string): void {
-  sessionBusy.add(sessionKey);
-}
-
-function clearSessionBusy(sessionKey: string): void {
-  sessionBusy.delete(sessionKey);
 }
 
 const nativeToolsDisabled = new Set<string>();
@@ -549,6 +536,7 @@ export interface CreateQwenStreamOptions {
   prepareBootstrap?: (prompt: string) => string;
   /** Client conversation key (OpenAI `user` field or x-qwen-session header). */
   sessionKey?: string;
+  sessionLease?: SessionLease;
   /** System + last user message only. Used when the server-side history can supply context. */
   economicalPrompt?: string;
   /** Skip reusing the pinned session chat and bootstrap the full conversation instead. */
@@ -572,7 +560,11 @@ export async function createQwenStream(
 ): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string, cancel: (reason?: unknown) => Promise<void> }> {
   options?.signal?.throwIfAborted();
   const sessionKey = options?.sessionKey;
-  const session = sessionKey && !options?.forceBootstrap ? getSession(sessionKey) : undefined;
+  if (options?.sessionLease && sessionKey) assertSessionLease(options.sessionLease, sessionKey);
+  const ownedLease = sessionKey && !options?.sessionLease ? await acquireSessionLease(sessionKey, options?.signal) : undefined;
+  let session: ReturnType<typeof getSession>;
+  try { session = sessionKey && !options?.forceBootstrap ? getSession(sessionKey) : undefined; }
+  catch (error) { ownedLease?.release(); throw error; }
 
   const useEconomical = !!(
     config.hybridSessions.enabled &&
@@ -581,8 +573,7 @@ export async function createQwenStream(
     session.instructionsHash === options?.instructionsHash &&
     options?.economicalPrompt &&
     accountId !== 'guest' &&
-    session.accountId !== 'guest' &&
-    !isSessionBusy(sessionKey)
+    session.accountId !== 'guest'
   );
 
   const effectiveAccountId = useEconomical
@@ -597,28 +588,15 @@ export async function createQwenStream(
   // Reserve a concurrency slot for the real account. All lanes share one
   // budget, so requests queue here (up to the configured wait) instead of
   // hammering the Qwen backend and tripping its per-account rate limits.
-  const accountSlot = await acquireAccountStreamSlot(streamLockKey, getRuntimeInt('ACCOUNT_STREAM_SLOT_WAIT_MS', config.accounts.streamSlotWaitMs));
+  const accountSlot = await acquireAccountStreamSlot(streamLockKey, getRuntimeInt('ACCOUNT_STREAM_SLOT_WAIT_MS', config.accounts.streamSlotWaitMs), options?.signal).catch(error => { ownedLease?.release(); throw error; });
   let accountStreamReleased = false;
 
-  let sessionLocked = false;
-  let usingPinnedChat = false;
-  if (useEconomical) {
-    markSessionBusy(sessionKey!);
-    sessionLocked = true;
-    usingPinnedChat = true;
-  }
+  const usingPinnedChat = useEconomical;
 
   const releaseAccountStreamOnce = () => {
     if (accountStreamReleased) return;
     accountStreamReleased = true;
     accountSlot.release();
-  };
-
-  const releaseSessionBusy = () => {
-    if (sessionLocked && sessionKey) {
-      sessionLocked = false;
-      clearSessionBusy(sessionKey);
-    }
   };
 
   const releaseLeasedChat = () => {
@@ -630,7 +608,7 @@ export async function createQwenStream(
 
   const releaseStreamResources = () => {
     releaseLeasedChat();
-    releaseSessionBusy();
+    ownedLease?.release();
     releaseAccountStreamOnce();
   };
 

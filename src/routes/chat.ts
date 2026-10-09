@@ -1,3 +1,4 @@
+import { acquireSessionLease, type SessionLease } from '../services/session-operation.js';
 import type { Context } from 'hono';
 import crypto from 'crypto';
 import { AttachmentDownloadError } from '../services/attachment-download.js';
@@ -161,10 +162,15 @@ export async function chatCompletions(c: Context) {
   const principal = getUserPrincipal(user);
   let detachAbort = () => {};
   let activeCompletionId: string | undefined;
+  let sessionLease: SessionLease | undefined;
+  let operationFinished = false;
   let userSlotHeld = false;
   let userSlotReleased = false;
   const releaseUserSlotOnce = () => {
+    operationFinished = true;
     detachAbort();
+    if (activeCompletionId && getStream(activeCompletionId)) return;
+    sessionLease?.release();
     if (!userSlotHeld || userSlotReleased || !user) return;
     userSlotReleased = true;
     releaseUserSlot(principal);
@@ -197,6 +203,17 @@ export async function chatCompletions(c: Context) {
       }
     }
     
+    const requestController = new AbortController();
+    const clientSignal = c.req.raw.signal;
+    const onClientAbort = () => requestController.abort(clientSignal.reason);
+    clientSignal.addEventListener('abort', onClientAbort, { once: true });
+    detachAbort = () => clientSignal.removeEventListener('abort', onClientAbort);
+    if (clientSignal.aborted) onClientAbort();
+    const rawSessionKey = typeof body.user === 'string' && body.user.trim()
+      ? body.user.trim() : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
+    const sessionKey = rawSessionKey ? resolveOwnedSessionKey(principal, rawSessionKey) : undefined;
+    if (sessionKey) sessionLease = await acquireSessionLease(sessionKey, requestController.signal);
+    requestController.signal.throwIfAborted();
     const messages = body.messages || [];
     const prepared = messages.map(prepareConversationMessage);
     const instructionMessages = prepared.filter(message => message.role === 'system' || message.role === 'developer');
@@ -207,12 +224,7 @@ export async function chatCompletions(c: Context) {
     // Resolve the session's chat id early so the tool_response replay below can
     // fall back to the emitted-tool registry when the client omits the original
     // assistant tool_calls message from history.
-    const earlyRawSessionKey = (typeof (body as any).user === 'string' && (body as any).user.trim())
-      ? (body as any).user.trim()
-      : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
-    const sessionChatId = earlyRawSessionKey
-      ? getSession(resolveOwnedSessionKey(principal, earlyRawSessionKey))?.chatId
-      : undefined;
+    const sessionChatId = sessionKey ? getSession(sessionKey)?.chatId : undefined;
     let lastUserContent = '';
     for (const msg of messages) {
       if (msg.role === 'assistant' && Array.isArray((msg as any).tool_calls)) {
@@ -330,10 +342,6 @@ export async function chatCompletions(c: Context) {
       ? body.reasoning_effort !== 'none'
       : !body.model.includes('no-thinking');
 
-    const rawSessionKey = (typeof bodyAny.user === 'string' && bodyAny.user.trim())
-      ? bodyAny.user.trim()
-      : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
-    const sessionKey = rawSessionKey ? resolveOwnedSessionKey(principal, rawSessionKey) : undefined;
     const session = sessionKey ? getSession(sessionKey) : undefined;
     const instructionsHash = crypto.createHash('sha256').update(JSON.stringify({ modelId, systemPrompt, toolChoice: bodyAny.tool_choice ?? 'auto' })).digest('hex');
     const lastMsg = messages[messages.length - 1];
@@ -399,13 +407,7 @@ export async function chatCompletions(c: Context) {
       if (!economicalPrompt.trim()) canEconomize = false;
     }
     const finalPrompt = canEconomize ? unboundedPrompt : prepareBootstrap(unboundedPrompt);
-    const requestController = new AbortController();
-    const clientSignal = c.req.raw.signal;
-    const onClientAbort = () => requestController.abort(clientSignal.reason);
-    clientSignal.addEventListener('abort', onClientAbort, { once: true });
-    detachAbort = () => clientSignal.removeEventListener('abort', onClientAbort);
-    if (clientSignal.aborted) onClientAbort();
-    const baseStreamOptions = { sessionKey, sessionOwner: principal, economicalPrompt, prepareBootstrap, instructionsHash, signal: requestController.signal };
+    const baseStreamOptions = { sessionKey, sessionLease, sessionOwner: principal, economicalPrompt, prepareBootstrap, instructionsHash, signal: requestController.signal };
 
     const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly);
     const completionId = 'chatcmpl-' + crypto.randomUUID();
@@ -418,6 +420,7 @@ export async function chatCompletions(c: Context) {
       }
       registerStream(completionId, {
         owner: principal,
+        onRemoved: () => { if (operationFinished) releaseUserSlotOnce(); },
         abortController: requestController,
         accountId: result.accountId,
         uiSessionId: result.uiSessionId,
