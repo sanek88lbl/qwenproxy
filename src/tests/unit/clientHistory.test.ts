@@ -126,3 +126,27 @@ test('history normalization preserves media and argument bytes while ignoring se
   changed.tool_calls[0].function.arguments = '{"path":"a"}';
   assert.notEqual(historyFingerprint([tool]), historyFingerprint([changed]));
 });
+
+test('a durable invalidation failure prevents sending a new completion into the pinned chat', async () => {
+  resetAllSessions();
+  config.hybridSessions.verify = false;
+  const { getDatabase } = await import('../../core/database.js');
+  const nativeFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(`data: {"response.created":{"response_id":"durable-parent"}}\n\ndata: {"response_id":"durable-parent","choices":[{"delta":{"content":"Durable answer.","phase":"answer"}}]}\n\ndata: [DONE]\n\n`);
+  };
+  const send = (messages: any[]) => app.fetch(new Request('http://localhost/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'qwen3.7-plus', user: 'durable-fixture', messages }) }));
+  try {
+    assert.equal((await send([{ role: 'user', content: 'Initial durable question.' }])).status, 200);
+    getDatabase().exec("CREATE TRIGGER block_invalidation BEFORE UPDATE ON sessions WHEN NEW.history_complete = 0 BEGIN SELECT RAISE(ABORT, 'fixture invalidation unavailable'); END;");
+    const history = [{ role: 'user', content: 'Initial durable question.' }, { role: 'assistant', content: 'Durable answer.' }, { role: 'user', content: 'Next question.' }];
+    const failed = await send(history);
+    assert.equal(failed.status, 500);
+    assert.equal(calls, 1, 'no completion may run before incomplete state is durable');
+    getDatabase().exec('DROP TRIGGER block_invalidation');
+    assert.equal((await send(history)).status, 200);
+    assert.equal(calls, 2);
+  } finally { getDatabase().exec('DROP TRIGGER IF EXISTS block_invalidation'); globalThis.fetch = nativeFetch; }
+});

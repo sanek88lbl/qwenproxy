@@ -11,7 +11,7 @@ import { getBaseAccountId } from '../core/account-lanes.js';
 import { getRuntimeBool, getRuntimeInt } from '../core/runtime-config.js';
 import { BAXIA_IFRAME_SELECTOR, solveBaxiaCaptcha } from './captcha-solver.js';
 import { uploadLargePromptAsFile } from '../routes/upload.js';
-import { getSession, setSession, getSessionParent, updateSessionParent, markHistoryIncomplete } from './session-manager.js';
+import { getSession, setSession, getSessionParent, updateSessionParent, beginSessionResponse } from './session-manager.js';
 import { buildAnswerDirective } from '../utils/degenerate-answer.js';
 import { sleep } from '../utils/sleep.js';
 import { CACHED_TIMEZONE, QWEN_WEB_VERSION } from '../utils/qwen-constants.js';
@@ -868,7 +868,7 @@ export async function createQwenStream(
     console.log(`[Session] Registered session ${sessionKey} -> chat ${chatId} on account ${chatAccountKey}`);
   }
 
-  markHistoryIncomplete(chatId);
+  beginSessionResponse(chatId);
 
     const timestamp = Math.floor(Date.now() / 1000);
     const fid = crypto.randomUUID();

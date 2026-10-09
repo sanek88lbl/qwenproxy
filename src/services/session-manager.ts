@@ -298,3 +298,11 @@ export function confirmSessionHistory(chatId: string, messages: ConversationMess
   const history = conversationHistory(messages);
   setSession(key, { ...session, historyComplete: true, confirmedHistoryHash: historyFingerprint(history), confirmedHistoryLength: history.length });
 }
+
+
+export function beginSessionResponse(chatId: string): void {
+  loadSessionsFromDb();
+  const key = chatToSession.get(chatId);
+  const session = key ? sessions.get(key) : undefined;
+  if (key && session) setSession(key, { ...session, historyComplete: false });
+}
