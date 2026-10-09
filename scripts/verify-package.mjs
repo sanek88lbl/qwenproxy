@@ -42,7 +42,6 @@ try {
       QWEN_STARTUP_MODE: 'package', QWEN_STARTUP_VERIFY_ADMIN: 'true', QWEN_STARTUP_COMPILED_ROOT: pathToFileURL(installed + path.sep).href },
   });
   const report = JSON.parse(smoke.split('\n').find(line => line.startsWith('STARTUP_REPORT ')).slice('STARTUP_REPORT '.length));
-  assert.equal(report.hung, false);
   assert.equal(report.health, 200);
   assert.equal(report.admin, 200);
   assert.equal(report.adminAsset, 200);

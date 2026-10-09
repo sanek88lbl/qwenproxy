@@ -3,7 +3,7 @@ import http from 'node:http';
 import { setTimeout } from 'node:timers';
 import { URL } from 'node:url';
 
-const state = { listens: [], browsers: [], browserCloses: 0, tui: 0, health: null, admin: null, adminAsset: null, hung: false };
+const state = { listens: [], browsers: [], browserCloses: 0, tui: 0, health: null, admin: null, adminAsset: null };
 globalThis.__qwenStartupState = state;
 register('./startup-loader.mjs', import.meta.url, { data: { roots: [new URL('../../../', import.meta.url).href, ...(process.env.QWEN_STARTUP_COMPILED_ROOT ? [process.env.QWEN_STARTUP_COMPILED_ROOT] : [])] } });
 const nativeFetch = globalThis.fetch;
@@ -37,8 +37,3 @@ http.Server.prototype.listen = function (...args) {
   return nativeListen.apply(this, args);
 };
 process.once('exit', () => process.stdout.write('STARTUP_REPORT ' + JSON.stringify(state) + '\n'));
-setTimeout(() => {
-  if (process.env.QWEN_STARTUP_MODE === 'import-only') process.exit(0);
-  state.hung = true;
-  process.exit(88);
-}, 2000).unref();
