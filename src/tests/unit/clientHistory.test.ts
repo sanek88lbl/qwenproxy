@@ -150,3 +150,25 @@ test('a durable invalidation failure prevents sending a new completion into the 
     assert.equal(calls, 2);
   } finally { getDatabase().exec('DROP TRIGGER IF EXISTS block_invalidation'); globalThis.fetch = nativeFetch; }
 });
+
+test('SSE reports a failed history commit before any successful terminal event', async () => {
+  resetAllSessions();
+  config.hybridSessions.verify = false;
+  const { getDatabase } = await import('../../core/database.js');
+  const nativeFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('data: {"response.created":{"response_id":"commit-parent"}}\n\ndata: {"response_id":"commit-parent","choices":[{"delta":{"content":"Confirmed fixture content.","phase":"answer"}}]}\n\ndata: [DONE]\n\n');
+  const send = (stream: boolean) => app.fetch(new Request('http://localhost/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'qwen3.7-plus', user: 'commit-fixture', stream, messages: [{ role: 'user', content: 'A history commit fixture.' }] }) }));
+  try {
+    getDatabase().exec("CREATE TRIGGER block_confirmation BEFORE UPDATE ON sessions WHEN NEW.confirmed_history_hash IS NOT NULL AND NEW.history_complete = 1 BEGIN SELECT RAISE(ABORT, 'fixture confirmation unavailable'); END;");
+    const response = await send(true);
+    const body = await response.text();
+    const events = body.split('\n\n').flatMap(event => event.startsWith('data: ') && event !== 'data: [DONE]' ? [JSON.parse(event.slice(6))] : []);
+    assert.equal(events.filter(event => event.error?.code === 'SessionPersistenceFailed').length, 1);
+    assert.equal(events.filter(event => event.choices?.some((choice: any) => choice.finish_reason === 'stop')).length, 0);
+    assert.equal(body.split('data: [DONE]').length - 1, 1);
+    assert.equal(listSessions()[0].history_complete, 0);
+    assert.equal(listSessions()[0].confirmed_history_hash, null);
+    getDatabase().exec('DROP TRIGGER block_confirmation');
+    assert.equal((await send(false)).status, 200, 'the failed operation must release its session lease');
+  } finally { getDatabase().exec('DROP TRIGGER IF EXISTS block_confirmation'); globalThis.fetch = nativeFetch; }
+});

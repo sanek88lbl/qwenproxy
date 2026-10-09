@@ -808,6 +808,17 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         prompt_tokens_details: { cached_tokens: cachedTokens }
       };
 
+      flushWrites();
+      if (clientAborted()) return;
+      try {
+        if (deliveredTools.size) delivered.tool_calls = [...deliveredTools.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
+        if (ctx.onHistoryComplete) ctx.onHistoryComplete(ctx.uiSessionId, delivered);
+        else markHistoryComplete(ctx.uiSessionId);
+      } catch (error) {
+        console.warn('[Chat] History confirmation failed:', error instanceof Error ? error.name : 'UnknownError');
+        finishProviderError({ code: 'SessionPersistenceFailed', message: 'The completed response could not be committed to the conversation history.', status: 500, retryable: false, dailyQuota: false });
+        return;
+      }
       const finalFinishReason = toolParser && toolParser.getEmittedToolCallCount() > 0 ? 'tool_calls' : (upstreamFinishReason || 'stop');
 
       writeEvent({
@@ -832,12 +843,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       }
       bufferedWrite('data: [DONE]\n\n');
       flushWrites();
-      if (!clientAborted()) {
-        if (deliveredTools.size) delivered.tool_calls = [...deliveredTools.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
-        if (ctx.onHistoryComplete) ctx.onHistoryComplete(ctx.uiSessionId, delivered);
-        else markHistoryComplete(ctx.uiSessionId);
-        succeeded = true;
-      }
+      succeeded = !clientAborted();
     } finally {
       if (clientSignal) clientSignal.removeEventListener('abort', onClientAbort);
       await releaseActiveStream('stream teardown');
