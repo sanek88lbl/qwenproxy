@@ -35,13 +35,13 @@ async function scenario(different: boolean, cancelWaiting = false, streaming = f
       controller.close();
     } }));
   };
-  const send = async (key: string, signal?: AbortSignal) => { const response = await app.fetch(new Request('http://localhost/v1/chat/completions', {
+  const send = async (key: string, signal?: AbortSignal, firstTurn = false) => { const response = await app.fetch(new Request('http://localhost/v1/chat/completions', {
     method: 'POST', signal, headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'qwen3.7-plus', stream: streaming, user: key, messages: [{ role: 'user', content: 'Previous question.' }, { role: 'assistant', content: 'Completed fixture answer.' }, { role: 'user', content: 'Follow up.' }] }),
+    body: JSON.stringify({ model: 'qwen3.7-plus', stream: streaming, user: key, messages: firstTurn ? [{ role: 'user', content: 'Previous question.' }] : [{ role: 'user', content: 'Previous question.' }, { role: 'assistant', content: 'Completed fixture answer.' }, { role: 'user', content: 'Follow up.' }] }),
   })); await response.text(); return response; };
   try {
     process.env.TEST_SESSION_ID = 'operation-first';
-    const first = send('same');
+    const first = send('same', undefined, true);
     for (let i = 0; i < 100 && !calls.length; i++) await sleep(5);
     assert.equal(calls.length, 1);
     process.env.TEST_SESSION_ID = 'operation-second';

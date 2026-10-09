@@ -1,3 +1,4 @@
+import type { ConversationMessage } from '../utils/conversation-serialization.js';
 import type { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import { StreamingToolParser } from '../tools/parser.js';
@@ -48,6 +49,7 @@ export interface StreamHandlerContext {
   streamOptions?: { include_usage?: boolean };
   /** Called exactly once when the response stream has fully finished. */
   onComplete?: () => void;
+  onHistoryComplete?: (chatId: string, message: ConversationMessage) => void;
   onUsage?: (promptTokens: number, completionTokens: number, failed?: boolean) => void;
   /**
    * Enables the streaming degenerate-answer guard: all emitted chunks are held
@@ -94,6 +96,25 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
     // syscall overhead on long responses. Ordering is preserved because EVERY write
     // (content, reasoning, events, [DONE]) goes through this single buffer.
     let writeBuffer = '';
+    const delivered: ConversationMessage = { role: 'assistant', content: '' };
+    const deliveredTools = new Map<number, any>();
+    const captureDelivered = (data: string) => {
+      for (const line of data.split('\n')) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        const event = JSON.parse(line.slice(6));
+        const delta = event.choices?.[0]?.delta;
+        if (!delta) continue;
+        if (typeof delta.content === 'string') delivered.content = String(delivered.content) + delta.content;
+        for (const call of delta.tool_calls ?? []) {
+          const previous = deliveredTools.get(call.index) ?? { function: { name: '', arguments: '' } };
+          if (call.id) previous.id = call.id;
+          if (call.type) previous.type = call.type;
+          if (call.function?.name) previous.function.name += call.function.name;
+          if (call.function?.arguments) previous.function.arguments += call.function.arguments;
+          deliveredTools.set(call.index, previous);
+        }
+      }
+    };
     let writeTimer: ReturnType<typeof setTimeout> | null = null;
     const WRITE_FLUSH_BYTES = 8192;
     const WRITE_FLUSH_MS = 3;
@@ -161,6 +182,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       if (writeBuffer) {
         const data = writeBuffer;
         writeBuffer = '';
+        captureDelivered(data);
         streamWriter.write(data);
       }
     };
@@ -811,7 +833,9 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       bufferedWrite('data: [DONE]\n\n');
       flushWrites();
       if (!clientAborted()) {
-        markHistoryComplete(ctx.uiSessionId);
+        if (deliveredTools.size) delivered.tool_calls = [...deliveredTools.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
+        if (ctx.onHistoryComplete) ctx.onHistoryComplete(ctx.uiSessionId, delivered);
+        else markHistoryComplete(ctx.uiSessionId);
         succeeded = true;
       }
     } finally {

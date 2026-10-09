@@ -55,7 +55,8 @@ async function forwardedToolCycle(messages: FixtureMessage[], systems: string[] 
   try {
     const turns = [
       [{ role: 'user', content: 'Read documentation and report its settings.' }],
-      messages,
+      messages[1]?.content === 'Fixture response completed.' && !messages[1]?.tool_calls?.length
+        ? messages : [messages[0], { role: 'assistant', content: 'Fixture response completed.' }, ...messages.slice(1)],
     ];
     for (const [index, turn] of turns.entries()) {
       setModelContextWindow('qwen3.7-plus', windows[index]);
@@ -75,7 +76,7 @@ async function forwardedToolCycle(messages: FixtureMessage[], systems: string[] 
     assert.equal(captured[1].parent_id, changed ? null : 'context-parent-1');
     if (systems[0] && systems[0] !== systems[1]) assert.ok(!captured[1].messages[0].content.includes(systems[0]), 'replaced instructions must not enter the new chat');
     const prompt = captured[1].messages[0].content as string;
-    if (!changed && messages.some(message => message.role === 'tool')) assert.ok(prompt.includes('RECENT TOOL ACTIVITY'));
+    if (!changed && messages.some(message => message.role === 'tool')) assert.ok(prompt.includes('Tool Response'));
     if (systems[0] === systems[1] && systems[0] && JSON.stringify(toolsets[0]) === JSON.stringify(toolsets[1])) assert.ok(!prompt.includes(systems[0]), 'unchanged instructions must not be appended to the server conversation again');
     return prompt;
   } finally {

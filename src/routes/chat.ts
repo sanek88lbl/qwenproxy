@@ -1,3 +1,5 @@
+import { conversationHistory, matchesConfirmedHistory } from '../services/client-history.js';
+import { confirmSessionHistory } from '../services/session-manager.js';
 import { acquireSessionLease, type SessionLease } from '../services/session-operation.js';
 import type { Context } from 'hono';
 import crypto from 'crypto';
@@ -106,57 +108,6 @@ async function verifyServerContextMatches(sessionKey: string, session: SessionEn
  * only sends `system + last user message` and the model loses stateful context
  * like to-do lists, file edits, or other actions it performed on prior turns.
  */
-function buildRecentToolContext(
-  messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
-): string {
-  if (!messages || messages.length === 0) return '';
-
-  const idToName = new Map<string, string>();
-  for (const msg of messages) {
-    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
-      for (const tc of msg.tool_calls) {
-        if (tc.id && tc.function?.name) idToName.set(tc.id, tc.function.name);
-      }
-    }
-  }
-
-  // Peel trailing user message(s): the current prompt is the LAST user message,
-  // so the tool activity of THIS cycle sits just before it.
-  let i = messages.length - 1;
-  while (i >= 0 && messages[i].role === 'user') i--;
-
-  const toolTurns: string[] = [];
-
-  for (; i >= 0; i--) {
-    const msg = messages[i];
-    // A user message below the trailing tail marks the start of the cycle.
-    if (msg.role === 'user') break;
-
-    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-      for (let j = msg.tool_calls.length - 1; j >= 0; j--) {
-        const tc = msg.tool_calls[j];
-        const name = tc.function?.name || 'unknown';
-        let argsStr = tc.function?.arguments || '';
-        if (typeof argsStr !== 'string') {
-          try { argsStr = JSON.stringify(argsStr); } catch { argsStr = ''; }
-        }
-        toolTurns.unshift(`  [call] ${name}(${argsStr})`);
-      }
-      const assistantText = (typeof msg.content === 'string' ? msg.content : '').trim();
-      if (assistantText) {
-        toolTurns.unshift(`  [assistant] ${assistantText}`);
-      }
-    } else if (msg.role === 'tool' || msg.role === 'function') {
-      const name = msg.name || idToName.get(msg.tool_call_id || '') || 'tool';
-      const contentStr = (typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)) || '';
-      toolTurns.unshift(`  [tool_response ${name}] ${contentStr}`);
-    }
-  }
-
-  if (toolTurns.length === 0) return '';
-  return `# RECENT TOOL ACTIVITY (you performed these actions earlier in this session — preserve state awareness):\n${toolTurns.join('\n')}\n`;
-}
-
 export async function chatCompletions(c: Context) {
   const user = (c as any).get?.('user') as UserIdentity | undefined;
   const principal = getUserPrincipal(user);
@@ -366,6 +317,7 @@ export async function chatCompletions(c: Context) {
     let canEconomize = !!(
       config.hybridSessions.enabled &&
       session?.historyComplete &&
+      matchesConfirmedHistory(messages, session) &&
       session.instructionsHash === instructionsHash &&
       session.accountId !== 'guest' &&
       !hasMultimodalInput &&
@@ -396,14 +348,9 @@ export async function chatCompletions(c: Context) {
     }
     let economicalPrompt: string | undefined;
     if (canEconomize) {
-      const recentToolContext = buildRecentToolContext(messages);
-      const parts: string[] = [];
-      if (hasTools && toolChoiceMode === 'none') parts.push('[TOOL USE DISABLED]\nDo not call tools in this response.');
-      if (recentToolContext) parts.push(recentToolContext);
-      if (lastMsg?.role === 'user') {
-        parts.push(`User: ${lastUserContent}`);
-      }
-      economicalPrompt = parts.join('\n');
+      const suffix = conversationHistory(messages).slice(session!.confirmedHistoryLength);
+      economicalPrompt = serializeConversationMessages(suffix.map(prepareConversationMessage), serializationOptions);
+      if (hasTools && toolChoiceMode === 'none') economicalPrompt = '[TOOL USE DISABLED]\nDo not call tools in this response.\n' + economicalPrompt;
       if (!economicalPrompt.trim()) canEconomize = false;
     }
     const finalPrompt = canEconomize ? unboundedPrompt : prepareBootstrap(unboundedPrompt);
@@ -732,6 +679,7 @@ export async function chatCompletions(c: Context) {
         completed = await collectResponse(retried.stream, retried.uiSessionId);
       }
 
+      let historySucceeded = true;
       let autoContinuesLeft = config.autoContinue.enabled ? config.autoContinue.maxContinues : 0;
       while (
         autoContinuesLeft > 0 &&
@@ -772,15 +720,20 @@ export async function chatCompletions(c: Context) {
             completed.isTruncated = continuedResponse.isTruncated;
             completed.targetResponseId = continuedResponse.targetResponseId;
           } else {
+            historySucceeded = false;
             break;
           }
         } catch (err: any) {
+          historySucceeded = false;
           requestController.signal.throwIfAborted();
           console.warn('[Chat] Non-streaming auto-continue failed:', err.message);
           break;
         }
       }
 
+      if (completed.status === 200 && historySucceeded && !requestController.signal.aborted) {
+        confirmSessionHistory(acquired.uiSessionId, [...messages, completed.body.choices[0].message]);
+      } else markHistoryIncomplete(acquired.uiSessionId);
       trackUsage(user ? user.id : 'anonymous', inputText, completed.status !== 200, completed.body?.usage?.completion_tokens ?? 0, completed.body?.usage?.prompt_tokens);
       trackModelUsage(modelId);
       releaseUserSlotOnce();
@@ -820,6 +773,7 @@ export async function chatCompletions(c: Context) {
         trackUsage(user ? user.id : 'anonymous', inputText, !!failed, completionTokens, promptTokens);
       },
       onComplete: releaseUserSlotOnce,
+      onHistoryComplete: (chatId, message) => confirmSessionHistory(chatId, [...messages, message]),
       onProviderRetry: retryProviderResponse,
       onDailyQuota: async (accountId: string, retryAllowed = true) => {
         quarantineDailyQuota(accountId);

@@ -79,6 +79,11 @@ async function request(route: string, token?: string, body?: unknown) {
     ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
   }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
+const continuation = [
+  { role: 'user', content: 'A controlled request.' },
+  { role: 'assistant', content: 'The controlled request completed successfully. It produced a deterministic answer for the authorization fixture, without contacting a real provider or reading account data.' },
+  { role: 'user', content: 'A follow-up request.' },
+];
 async function chat(token: string, key: string, messages = [{ role: 'user', content: 'A controlled request.' }]) {
   const response = await request('/v1/chat/completions', token, { model: 'qwen3.7-plus', user: key, stream: false, messages });
   const body = await response.json();
@@ -120,7 +125,7 @@ try {
       assert.equal((await chat('fixture-bob', 'bob-tool-session', [{ role: 'tool', content: 'fixture foreign result', tool_call_id: 'foreign-call' } as any])).response.status, 400);
       assert.equal(payloads.length, before);
       assert.equal(JSON.stringify(listSessions()[0]), aliceSnapshot);
-      assert.equal((await chat('fixture-alice', aliceRow.chat_id)).response.status, 200);
+      assert.equal((await chat('fixture-alice', aliceRow.chat_id, continuation)).response.status, 200);
       assert.equal(payloads.at(-1).chat_id, aliceRow.chat_id);
       assert.equal((await chat('fixture-alice', aliceRow.chat_id, [{ role: 'tool', content: 'fixture own result', tool_call_id: 'foreign-call' } as any])).response.status, 200);
     } else if (scenario === 'persistence') {
@@ -129,7 +134,7 @@ try {
       assert.equal(result.status, 0, result.stdout + result.stderr);
     } else {
       upsertUser({ id: 'alice', email: 'alice@example.invalid', apiKey: 'fixture-alice-rotated' });
-      assert.equal((await chat('fixture-alice-rotated', 'shared-client-key')).response.status, 200);
+      assert.equal((await chat('fixture-alice-rotated', 'shared-client-key', continuation)).response.status, 200);
       assert.equal(payloads.at(-1).chat_id, aliceRow.chat_id);
       assert.equal((await request('/v1/identity-fixture', 'fixture-alice')).status, 401);
     }
@@ -169,7 +174,7 @@ try {
     const expected = process.env.QWEN_OWNERSHIP_EXPECTED_CHAT!;
     assert.equal((await chat('fixture-bob', expected)).response.status, 403);
     assert.equal(payloads.length, 0);
-    assert.equal((await chat('fixture-alice', expected)).response.status, 200);
+    assert.equal((await chat('fixture-alice', expected, continuation)).response.status, 200);
     assert.equal(payloads[0].chat_id, expected);
   } else if (scenario === 'namespace-collisions') {
     const { config } = await import('../../core/config.js');
@@ -191,7 +196,7 @@ try {
     const before = listSessions()[0];
     const { config } = await import('../../core/config.js');
     config.users.apiKeys = 'fixture-env-rotated:env-user';
-    assert.equal((await chat('fixture-env-rotated', 'env-client')).response.status, 200);
+    assert.equal((await chat('fixture-env-rotated', 'env-client', continuation)).response.status, 200);
     assert.equal(payloads.at(-1).chat_id, before.chat_id);
     assert.equal((await request('/v1/identity-fixture', 'fixture-env')).status, 401);
     assert.equal((getDatabase().prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n, 0);

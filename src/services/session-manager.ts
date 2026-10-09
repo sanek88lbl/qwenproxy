@@ -1,3 +1,5 @@
+import { conversationHistory, historyFingerprint } from './client-history.js';
+import type { ConversationMessage } from '../utils/conversation-serialization.js';
 /**
  * Server-side conversation session tracking for the hybrid send strategy.
  *
@@ -30,6 +32,8 @@ export interface SessionEntry {
   historyComplete: boolean;
   updatedAt: number;
   instructionsHash?: string;
+  confirmedHistoryHash?: string;
+  confirmedHistoryLength?: number;
   owner?: string | null;
 }
 
@@ -99,6 +103,8 @@ function loadSessionsFromDb(): void {
         historyComplete: row.history_complete !== 0,
         updatedAt: row.updated_at,
         instructionsHash: row.instructions_hash || undefined,
+        confirmedHistoryHash: row.confirmed_history_hash || undefined,
+        confirmedHistoryLength: row.confirmed_history_length || 0,
         owner: row.owner ?? null,
       };
       sessions.set(row.session_key, entry);
@@ -130,6 +136,8 @@ function persistSession(sessionKey: string, entry: SessionEntry, strict = false)
       updated_at: entry.updatedAt,
       instructions_hash: entry.instructionsHash,
       owner: entry.owner ?? null,
+      confirmed_history_hash: entry.confirmedHistoryHash,
+      confirmed_history_length: entry.confirmedHistoryLength ?? 0,
     });
   } catch (err: any) {
     if (strict) throw err;
@@ -279,4 +287,14 @@ export function resetAllSessions(): void {
     const db = getDatabase();
     db.prepare('DELETE FROM sessions').run();
   } catch { /* ignore */ }
+}
+
+
+export function confirmSessionHistory(chatId: string, messages: ConversationMessage[]): void {
+  loadSessionsFromDb();
+  const key = chatToSession.get(chatId);
+  const session = key ? sessions.get(key) : undefined;
+  if (!key || !session) return;
+  const history = conversationHistory(messages);
+  setSession(key, { ...session, historyComplete: true, confirmedHistoryHash: historyFingerprint(history), confirmedHistoryLength: history.length });
 }

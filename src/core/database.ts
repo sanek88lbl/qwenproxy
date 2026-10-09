@@ -100,6 +100,9 @@ function runMigrations(db: Database.Database): void {
     if (!(db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).some(column => column.name === 'owner')) {
       db.exec('ALTER TABLE sessions ADD COLUMN owner TEXT;');
     }
+    const columns = db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === 'confirmed_history_hash')) db.exec('ALTER TABLE sessions ADD COLUMN confirmed_history_hash TEXT;');
+    if (!columns.some(column => column.name === 'confirmed_history_length')) db.exec('ALTER TABLE sessions ADD COLUMN confirmed_history_length INTEGER NOT NULL DEFAULT 0;');
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_owned_chat ON sessions(chat_id) WHERE owner IS NOT NULL;');
   })();
 }
@@ -241,19 +244,21 @@ export interface SessionRow {
   parent_id: string | null
   history_complete: number
   updated_at: number
+  confirmed_history_hash?: string | null
+  confirmed_history_length?: number
   instructions_hash?: string | null
   owner?: string | null
 }
 
 export function listSessions(): SessionRow[] {
-  return getDatabase().prepare('SELECT session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash, owner FROM sessions').all() as SessionRow[]
+  return getDatabase().prepare('SELECT session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash, owner, confirmed_history_hash, confirmed_history_length FROM sessions').all() as SessionRow[]
 }
 
 export function upsertSession(row: SessionRow): void {
   const result = getDatabase()
     .prepare(`
-      INSERT INTO sessions (session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash, owner)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (session_key, chat_id, account_id, headers, parent_id, history_complete, updated_at, instructions_hash, owner, confirmed_history_hash, confirmed_history_length)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_key) DO UPDATE SET
         chat_id = excluded.chat_id,
         account_id = excluded.account_id,
@@ -261,10 +266,12 @@ export function upsertSession(row: SessionRow): void {
         parent_id = excluded.parent_id,
         history_complete = excluded.history_complete,
         updated_at = excluded.updated_at,
-        instructions_hash = excluded.instructions_hash
+        instructions_hash = excluded.instructions_hash,
+        confirmed_history_hash = excluded.confirmed_history_hash,
+        confirmed_history_length = excluded.confirmed_history_length
       WHERE sessions.owner IS excluded.owner
     `)
-    .run(row.session_key, row.chat_id, row.account_id, row.headers, row.parent_id, row.history_complete, row.updated_at, row.instructions_hash ?? null, row.owner ?? null)
+    .run(row.session_key, row.chat_id, row.account_id, row.headers, row.parent_id, row.history_complete, row.updated_at, row.instructions_hash ?? null, row.owner ?? null, row.confirmed_history_hash ?? null, row.confirmed_history_length ?? 0)
   if (result.changes !== 1) throw new Error('Session ownership conflict');
 }
 

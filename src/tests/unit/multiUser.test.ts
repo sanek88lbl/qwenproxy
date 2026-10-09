@@ -155,7 +155,7 @@ test('session reconciliation: matching server history keeps economical mode', as
         user: 'conv-recon',
         messages: [
           { role: 'user', content: 'Turn 1' },
-          { role: 'assistant', content: 'Aa' },
+          { role: 'assistant', content: 'Resposta completa para o teste.' },
           { role: 'user', content: 'Turn 2' }
         ]
       })
@@ -207,7 +207,7 @@ test('session reconciliation: diverged server history forces a full re-bootstrap
         user: 'conv-div',
         messages: [
           { role: 'user', content: 'Turn 1' },
-          { role: 'assistant', content: 'Aa' },
+          { role: 'assistant', content: 'Resposta completa para o teste.' },
           { role: 'user', content: 'Turn 2' }
         ]
       })
