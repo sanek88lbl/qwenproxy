@@ -8,7 +8,7 @@ export function addServerOptions(program: Command): Command {
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new InvalidArgumentError('Port must be an integer between 1 and 65535');
     return port;
   }).addOption(new Option('--browser <browser>', 'Browser to use').choices(['chromium', 'firefox', 'webkit', 'chrome', 'edge']))
-    .option('--quiet', 'Suppress startup banner');
+    .option('--quiet', 'Suppress startup banner').option('--dev', 'Use the Vite development dashboard');
 }
 
 export function serverOverridesFromOptions(options: Record<string, unknown>): StartupOverrides {

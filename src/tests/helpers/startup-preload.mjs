@@ -3,7 +3,7 @@ import http from 'node:http';
 import { setTimeout } from 'node:timers';
 import { URL } from 'node:url';
 
-const state = { listens: [], browsers: [], browserCloses: 0, tui: 0, health: null, admin: null, adminAsset: null };
+const state = { listens: [], browsers: [], browserCloses: 0, tui: 0, health: null, admin: null, adminAsset: null, devRedirect: null };
 globalThis.__qwenStartupState = state;
 register('./startup-loader.mjs', import.meta.url, { data: { roots: [new URL('../../../', import.meta.url).href, ...(process.env.QWEN_STARTUP_COMPILED_ROOT ? [process.env.QWEN_STARTUP_COMPILED_ROOT] : [])] } });
 const nativeFetch = globalThis.fetch;
@@ -21,6 +21,10 @@ http.Server.prototype.listen = function (...args) {
     setTimeout(async () => {
       const response = await nativeFetch(`http://127.0.0.1:${row.actualPort}/health`);
       state.health = response.status;
+      if (process.argv.includes('--dev')) {
+        const admin = await nativeFetch(`http://127.0.0.1:${row.actualPort}/admin/`, { redirect: 'manual' });
+        state.devRedirect = admin.status === 302 ? admin.headers.get('location') : null;
+      }
       if (process.env.QWEN_STARTUP_VERIFY_ADMIN === 'true') {
         const admin = await nativeFetch(`http://127.0.0.1:${row.actualPort}/admin/`);
         const html = await admin.text();

@@ -142,3 +142,12 @@ test('an invalid environment port is rejected before initialization', async () =
   assert.deepEqual(result.report.browsers, []);
   assert.deepEqual(result.report.listens, []);
 });
+
+test('the documented npm dev entry accepts --dev and starts its listener once', async () => {
+  const port = await freePort();
+  const result = await run('direct', { QWEN_WEB_DEV_URL: 'http://127.0.0.1:5173' }, ['--dev', '--port', String(port), '--quiet']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.report.health, 200);
+  assert.equal(result.report.devRedirect, 'http://127.0.0.1:5173/admin/');
+  assert.deepEqual(result.report.listens, [{ requestedPort: port, actualPort: port }]);
+});
