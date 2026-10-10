@@ -10,7 +10,7 @@
 
 import { updateSessionParent } from '../services/qwen.js';
 import { isOverloadMessage } from './overload-detector.js';
-import { parseQwenProviderError } from './qwen-provider-error.js';
+import { parseQwenProviderError, malformedQwenToolCallError } from './qwen-provider-error.js';
 import type { QwenProviderError } from './qwen-provider-error.js';
 import { getIncrementalDelta } from '../routes/chat.js';
 import { StreamingToolParser } from '../tools/parser.js';
@@ -67,6 +67,7 @@ export interface StreamParserState {
 }
 
 export interface QwenStreamParseOptions {
+  enableToolParsing?: boolean;
   /** Tool definitions for the streaming tool parser. Pass [] or null to disable tool parsing. */
   tools?: FunctionToolDefinition[];
   /** Callback invoked when a response_id is discovered. */
@@ -108,6 +109,7 @@ export class QwenStreamParser {
     this.uiSessionId = uiSessionId;
     this.options = {
       tools: options.tools ?? [],
+      enableToolParsing: options.enableToolParsing,
       onTargetResponseId: options.onTargetResponseId,
       onThinking: options.onThinking,
       onAnswer: options.onAnswer,
@@ -127,8 +129,8 @@ export class QwenStreamParser {
       finishReason: null,
     };
 
-    this.toolParser = this.options.tools && this.options.tools.length > 0
-      ? new StreamingToolParser(this.options.tools)
+    this.toolParser = (this.options.enableToolParsing ?? this.options.tools.length > 0)
+      ? new StreamingToolParser(this.options.tools, true)
       : null;
   }
 
@@ -209,6 +211,7 @@ export class QwenStreamParser {
 
       if (this.toolParser) {
         const { text, toolCalls } = this.toolParser.feed(actualDelta);
+        if (this.toolParser.hasMalformedToolCalls()) this._state.upstreamError ??= malformedQwenToolCallError();
         for (const tc of toolCalls) {
           this.options.onToolCall?.({
             id: tc.id,
@@ -236,6 +239,7 @@ export class QwenStreamParser {
   flush(): { text: string; toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> } {
     if (this.toolParser) {
       const flushed = this.toolParser.flush();
+      if (this.toolParser.hasMalformedToolCalls()) this._state.upstreamError ??= malformedQwenToolCallError();
       if (flushed.text && looksLikeUnwrappedToolCall(flushed.text)) {
         return { text: '', toolCalls: [...flushed.toolCalls, ...parseUnwrappedToolCalls(flushed.text)] };
       }
@@ -262,8 +266,8 @@ export class QwenStreamParser {
     };
     this._contentLength = 0;
     this._contentSuffix = '';
-    this.toolParser = this.options.tools && this.options.tools.length > 0
-      ? new StreamingToolParser(this.options.tools)
+    this.toolParser = (this.options.enableToolParsing ?? this.options.tools.length > 0)
+      ? new StreamingToolParser(this.options.tools, true)
       : null;
   }
 

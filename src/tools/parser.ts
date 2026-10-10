@@ -381,13 +381,14 @@ export class StreamingToolParser {
   private insideTool = false;
   private currentOpenTag = TOOL_START_LITERAL;
   private emittedToolCallCount = 0;
+  private malformedToolCallCount = 0;
   private pendingLeadIn = '';
   private tools: FunctionToolDefinition[] = [];
 
   /**
    * @param tools - Optional array of tool definitions for name inference
    */
-  constructor(tools: FunctionToolDefinition[] = []) {
+  constructor(tools: FunctionToolDefinition[] = [], private readonly rejectMalformed = false) {
     this.tools = tools;
   }
 
@@ -487,8 +488,10 @@ export class StreamingToolParser {
             logger.warn(`[parser] Dropping unrecoverable unclosed tool call at end of stream (${n} total)`)
           );
           result.text += this.pendingLeadIn;
-          result.text += this.currentOpenTag + this.buffer + closeTagFor(this.currentOpenTag);
+          this.malformedToolCallCount++;
+          if (!this.rejectMalformed) result.text += this.currentOpenTag + this.buffer + closeTagFor(this.currentOpenTag);
         }      } else {
+        this.malformedToolCallCount++;
         result.text += this.pendingLeadIn;
       }
     } else {
@@ -496,10 +499,13 @@ export class StreamingToolParser {
     }
 
     this.buffer = '';
+    this.pendingLeadIn = '';
     this.insideTool = false;
     this.currentOpenTag = TOOL_START_LITERAL;
     return result;
   }
+
+  hasMalformedToolCalls(): boolean { return this.malformedToolCallCount > 0; }
 
   getEmittedToolCallCount(): number {
     return this.emittedToolCallCount;
@@ -514,6 +520,7 @@ export class StreamingToolParser {
   private processToolContent(content: string, result: ParserResult): void {
     let t = content.trim();
     if (!t) {
+      this.malformedToolCallCount++;
       logger.debug('[parser] Dropping empty tool call block');
       if (this.emittedToolCallCount === 0 && this.pendingLeadIn.trim().length > 0) {
         result.text += this.pendingLeadIn;
@@ -552,12 +559,13 @@ export class StreamingToolParser {
     if (t.startsWith('[')) {
       try {
         const arr = JSON.parse(t);
+        if (!Array.isArray(arr) || arr.length === 0) this.malformedToolCallCount++;
         for (const item of arr) {
           const tc = this.parseToolCall(item);
           if (tc) {
             result.toolCalls.push(tc);
             this.emittedToolCallCount++;
-          }
+          } else this.malformedToolCallCount++;
         }
         this.pendingLeadIn = '';
         return;
@@ -578,7 +586,7 @@ export class StreamingToolParser {
           if (tc.name) {
             result.toolCalls.push(tc);
             this.emittedToolCallCount++;
-          }
+          } else this.malformedToolCallCount++;
         }
         this.pendingLeadIn = '';
         return;
@@ -586,6 +594,7 @@ export class StreamingToolParser {
     }
 
     // 4) Tool call is malformed and unrecoverable.
+    this.malformedToolCallCount++;
     metrics.increment('toolcalls.malformed');
     throttledWarn('malformed', (n) =>
       logger.warn(`[parser] Dropping malformed tool call block (${n} total)`, {
@@ -596,7 +605,7 @@ export class StreamingToolParser {
       })
     );
     result.text += this.pendingLeadIn;
-    result.text += this.currentOpenTag + content + closeTagFor(this.currentOpenTag);
+    if (!this.rejectMalformed) result.text += this.currentOpenTag + content + closeTagFor(this.currentOpenTag);
     this.pendingLeadIn = '';
   }
 

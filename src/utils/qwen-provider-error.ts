@@ -36,3 +36,8 @@ export function parseQwenProviderBody(raw: string): QwenProviderError | null {
 export function qwenErrorBody(error: QwenProviderError) {
   return { error: { message: error.message, type: error.status === 429 ? 'rate_limit_error' : 'api_error', code: error.code, ...(error.providerCode ? { provider_code: error.providerCode } : {}) } };
 }
+
+
+export function malformedQwenToolCallError(): QwenProviderError {
+  return { code: 'MalformedToolCall', message: 'Qwen returned an invalid tool call. No successful completion was committed; retry the request.', status: 502, retryable: false, dailyQuota: false };
+}

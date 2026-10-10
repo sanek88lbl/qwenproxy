@@ -9,7 +9,7 @@ import { textContainsToolCallStart } from '../tools/toolcall-tags.js';
 import { isDegenerateAnswer, canFastReleaseGuard } from '../utils/degenerate-answer.js';
 import { isOverloadMessage } from '../utils/overload-detector.js';
 import { isDailyQuotaAssistantMessage, couldBeDailyQuotaAssistantMessagePrefix } from '../utils/qwen-quota-message.js';
-import { parseQwenProviderError, parseQwenProviderBody, emptyQwenResponseError, qwenErrorBody } from '../utils/qwen-provider-error.js';
+import { parseQwenProviderError, parseQwenProviderBody, emptyQwenResponseError, qwenErrorBody, malformedQwenToolCallError } from '../utils/qwen-provider-error.js';
 import type { QwenProviderError } from '../utils/qwen-provider-error.js';
 import { removeStream, getStream, updateStreamResponseId } from '../core/stream-registry.js';
 import { recordToolCall } from '../core/tool-call-debug.js';
@@ -335,7 +335,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let targetResponseId: string | null = null;
       let targetResponseIdSet = false;
       let currentThoughtIndex = 0;
-      let toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
+      let toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools, true) : null;
       let sawToolCallSignal = false;
       let toolCallRetried = false;
       let bufferChunks: string[] = [];
@@ -356,7 +356,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         targetResponseId = null;
         targetResponseIdSet = false;
         currentThoughtIndex = 0;
-        toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools) : null;
+        toolParser = ctx.hasTools ? new StreamingToolParser(ctx.tools, true) : null;
         sawToolCallSignal = false;
         bufferChunks = [];
         bufferLen = 0;
@@ -527,6 +527,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
                 }
                 if (ctx.hasTools && toolParser) {
                   const { text, toolCalls } = toolParser.feed(vStr);
+                  if (toolParser.hasMalformedToolCalls()) providerError ??= malformedQwenToolCallError();
                   if (toolParser.isInsideTool() || textContainsToolCallStart(vStr)) {
                     sawToolCallSignal = true;
                   }
@@ -559,6 +560,19 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         lineStart = pos;
       };
 
+      const flushToolParser = () => {
+        if (!toolParser || providerError) return;
+        const flushed = toolParser.flush();
+        if (toolParser.hasMalformedToolCalls()) providerError ??= malformedQwenToolCallError();
+        if (flushed.text && !providerError) {
+          if (looksLikeUnwrappedToolCall(flushed.text)) {
+            const calls = parseUnwrappedToolCalls(flushed.text);
+            for (const [index, call] of calls.entries()) emitStreamingToolCall(call, toolParser.getEmittedToolCallCount() + index);
+          } else fastWriteContent(flushed.text);
+        }
+        for (const [index, call] of flushed.toolCalls.entries()) emitStreamingToolCall(call, toolParser.getEmittedToolCallCount() - flushed.toolCalls.length + index);
+      };
+
       const finishProviderError = (error: QwenProviderError, hideNotice = false) => {
         if (hideNotice) {
           heldOutput = '';
@@ -577,6 +591,7 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
       let providerRetriesLeft = 1;
       const recoverResponse = async (retryAllowed = true): Promise<boolean> => {
         while (!clientAborted()) {
+          flushToolParser();
           let error = await resolveResponseError(providerError, lastFullContent, emittedStreamingToolIds.size, ctx.completionId, ctx.uiSessionId, targetResponseId, clientSignal);
           if (!error && emittedStreamingToolIds.size === 0 && isDailyQuotaAssistantMessage(lastFullContent)) {
             error = { code: 'RateLimited', message: 'Qwen daily chat quota exhausted; no eligible recovery response is available.', status: 429, retryable: false, dailyQuota: true };
@@ -776,31 +791,6 @@ export function handleStreamingResponse(c: Context, ctx: StreamHandlerContext): 
         releaseQuotaProbe();
       }
 
-      if (toolParser) {
-        const flushResult = toolParser.flush();
-        if (flushResult.text) {
-          if (ctx.hasTools && looksLikeUnwrappedToolCall(flushResult.text)) {
-            const unwrappedToolCalls = parseUnwrappedToolCalls(flushResult.text);
-            const baseIndex = toolParser.getEmittedToolCallCount();
-            for (let idx = 0; idx < unwrappedToolCalls.length; idx++) {
-              const tc = unwrappedToolCalls[idx];
-              emitStreamingToolCall(tc, baseIndex + idx);
-            }
-          } else if (emittedStreamingToolIds.size === 0) {
-            writeEvent({
-              id: ctx.completionId,
-              object: 'chat.completion.chunk',
-              created: createdTimestamp,
-              model: ctx.model,
-              choices: [makeChoice({ content: flushResult.text })]
-            });
-          }
-        }
-        for (let idx = 0; idx < flushResult.toolCalls.length; idx++) {
-          emitStreamingToolCall(flushResult.toolCalls[idx], toolParser.getEmittedToolCallCount() - flushResult.toolCalls.length + idx);
-        }
-      }
-
       const usage = {
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
@@ -918,6 +908,7 @@ export async function collectNonStreamingResult(
   const qwenParser = new QwenStreamParser(uiSessionId, {
     onTargetResponseId: responseId => updateStreamResponseId(completionId, uiSessionId, responseId),
     tools: hasTools ? tools : [],
+    enableToolParsing: hasTools,
     onThinking: () => {},
     onToolCall: (tc) => {
       pushToolCall(tc);
