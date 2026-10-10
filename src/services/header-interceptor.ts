@@ -1,5 +1,5 @@
 import { config } from '../core/config.js';
-import { getActiveAccountCount, markAccountReady } from '../core/account-manager.js';
+import { getActiveAccountCount, markAccountReady, markAccountNotReady } from '../core/account-manager.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
 import {
   CHROME_UA,
@@ -9,7 +9,6 @@ import {
   getHeadersTtlMs,
   getBackgroundHeaderRefresh,
   sleep,
-  accountContexts,
   accountPages,
   cachedUserAgents,
   cookieCaches,
@@ -27,6 +26,7 @@ import {
   resetBrowserProfile,
   initPlaywright,
   initPlaywrightForAccount,
+  loginToQwenWithContext,
   dismissAgeModal,
 } from './browser-manager.js';
 import { getStealthScript } from './stealth.js';
@@ -426,25 +426,10 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
       const creds = getAccountCredentials(getBaseAccountId(accountId));
       if (creds && creds.email && creds.password) {
         console.log(`[Playwright] Detected login page for account ${creds.email}. Attempting login...`);
-        const acctContext = accountContexts.get(accountId);
-        if (acctContext) {
-          const pageForLogin = accountPages.get(accountId);
-          if (pageForLogin) {
-            const hashedPassword = (await import('crypto')).createHash('sha256').update(creds.password).digest('hex');
-            await pageForLogin.evaluate(async ({ email, password }) => {
-              await fetch('https://chat.qwen.ai/api/v2/auths/signin', {
-                method: 'POST',
-                headers: {
-                  'accept': 'application/json, text/plain, */*',
-                  'content-type': 'application/json',
-                  'source': 'web',
-                  'timezone': new Date().toString().split(' (')[0],
-                  'x-request-id': crypto.randomUUID(),
-                },
-                body: JSON.stringify({ email, password, login_type: 'email' }),
-              });
-            }, { email: creds.email, password: hashedPassword });
-          }
+        markAccountNotReady(cacheKey);
+        cookieCaches.delete(cacheKey);
+        if (!await loginToQwenWithContext(page.context(), page, creds.email, creds.password)) {
+          throw new Error('Qwen rejected account login');
         }
       }
     }

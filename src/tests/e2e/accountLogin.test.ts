@@ -8,13 +8,27 @@ import { chromium } from 'playwright';
 const cwd = process.cwd();
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-browser-login-'));
 process.chdir(directory);
-const { getActivePage, setActivePage, loginToQwen } = await import('../../services/browser-manager.js');
+const { getActivePage, setActivePage, loginToQwen, accountContexts, accountPages, accountHeaderCaches, cookieCaches, cachedUserAgents } = await import('../../services/browser-manager.js');
+const { addAccount } = await import('../../core/accounts.js');
+const { markAccountNotReady, isAccountReady } = await import('../../core/account-manager.js');
+const { getQwenHeaders } = await import('../../services/header-interceptor.js');
 const { config } = await import('../../core/config.js');
 const { closeDatabase } = await import('../../core/database.js');
 after(() => { closeDatabase(); process.chdir(cwd); fs.rmSync(directory, { recursive: true, force: true }); });
 
-for (const rotateOnSignIn of [false, true]) {
-  test(`browser login recovers an expired refresh session and preserves neighboring accounts (signin rotation=${rotateOnSignIn})`, { timeout: 15000 }, async () => {
+for (const { rotateOnSignIn, refreshHeaders } of [
+  { rotateOnSignIn: false, refreshHeaders: false },
+  { rotateOnSignIn: true, refreshHeaders: false },
+  { rotateOnSignIn: false, refreshHeaders: true },
+]) {
+  test(`browser login recovers an expired refresh session and preserves neighboring accounts (signin rotation=${rotateOnSignIn}, header refresh=${refreshHeaders})`, { timeout: 15000 }, async t => {
+    let settingsUpdated: (() => void) | undefined;
+    const updateComplete = new Promise<void>(resolve => { settingsUpdated = resolve; });
+    t.mock.method(globalThis, 'fetch', async (input: unknown) => {
+      assert.equal(String(input), 'https://chat.qwen.ai/api/v2/users/user/settings/update');
+      settingsUpdated!();
+      return new Response('{}', { status: 200 });
+    });
     const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
     const context = await browser.newContext();
     const adjacent = await browser.newContext();
@@ -23,6 +37,7 @@ for (const rotateOnSignIn of [false, true]) {
     const previousTimeout = config.timeouts.page;
     config.timeouts.page = 1500;
     const email = 'browser-login@example.test';
+    const account = refreshHeaders ? addAccount(email, 'fixture-password') : undefined;
     const accessToken = `fixture.${Buffer.from(JSON.stringify({ type: 'access_token', exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.fixture`;
     let signIns = 0;
     let rejectedRefreshes = 0;
@@ -80,16 +95,34 @@ for (const rotateOnSignIn of [false, true]) {
             await fetch('https://auth.qwen.ai/api/v2/auths/', {
               credentials: 'include', headers: { authorization: 'Bearer ' + localStorage.getItem('token') }
             });
+            if (payload.success) {
+              const input = document.createElement('textarea'); input.className = 'message-input-textarea'; document.body.append(input);
+              const button = document.createElement('button'); button.className = 'send-button'; button.textContent = 'Send'; document.body.append(button);
+              button.onclick = () => fetch('https://chat.qwen.ai/api/v2/chat/completions', {
+                method: 'POST', headers: { 'content-type': 'application/json', 'bx-ua': 'fixture-bx-ua' },
+                body: JSON.stringify({ chat_id: 'fixture-header-chat', parent_id: null })
+              }).catch(() => {});
+            }
           })();
         </script></html>` });
       }
-      if (url.hostname === 'chat.qwen.ai' && url.pathname === '/auth') return route.fulfill({ contentType: 'text/html', body: '<html>sign in</html>' });
+      if (url.hostname === 'chat.qwen.ai' && url.pathname === '/auth') return route.fulfill({ contentType: 'text/html', body: '<html><input type="email"></html>' });
       return route.abort();
     });
     const page = await context.newPage();
-    setActivePage(page);
+    setActivePage(refreshHeaders ? adjacentPage : page);
     try {
-      assert.equal(await loginToQwen(email, 'fixture-password'), true);
+      if (account) {
+        await page.goto('https://chat.qwen.ai/auth');
+        accountPages.set(account.id, page); accountContexts.set(account.id, context);
+        const captured = await getQwenHeaders(true, account.id);
+        assert.equal(captured.chatSessionId, 'fixture-header-chat');
+        assert.equal(captured.headers['bx-ua'], 'fixture-bx-ua');
+        assert.equal(isAccountReady(account.id), true);
+        await updateComplete;
+      } else {
+        assert.equal(await loginToQwen(email, 'fixture-password'), true);
+      }
       assert.equal(signIns, 1);
       assert.equal(rejectedRefreshes, 0);
       const saved = await context.cookies();
@@ -104,6 +137,10 @@ for (const rotateOnSignIn of [false, true]) {
       assert.equal(await adjacentPage.locator('body').innerText(), 'adjacent account');
       assert.equal(await thirdPage.locator('body').innerText(), 'adjacent account');
     } finally {
+      if (account) {
+        accountPages.delete(account.id); accountContexts.delete(account.id); accountHeaderCaches.delete(account.id);
+        cookieCaches.delete(account.id); cachedUserAgents.delete(account.id); markAccountNotReady(account.id);
+      }
       setActivePage(previousPage);
       config.timeouts.page = previousTimeout;
       await browser.close();

@@ -392,7 +392,7 @@ async function confirmAccountSession(page: Page, email: string): Promise<void> {
   await checked;
 }
 
-async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
+export async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
   await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
 
   const authUrls = ['https://chat.qwen.ai/api/v2/auths/signin', 'https://auth.qwen.ai/api/v2/auths/refresh'];
