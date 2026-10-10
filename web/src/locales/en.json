@@ -145,6 +145,7 @@
     "add": "Add",
     "ready": "ready",
     "warmingUp": "warming up",
+    "sleeping": "sleeping",
     "qwenAccounts": "Qwen Accounts",
     "accountsConfigured": "account(s) configured",
     "tableId": "ID",

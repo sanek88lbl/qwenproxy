@@ -141,7 +141,7 @@ export function AccountsPage() {
                           {inUse.includes(a.id) ? t('accounts.inUse') : t('accounts.free')}
                         </Badge>
                         <Badge variant="outline" className={a.ready ? 'text-emerald-400' : 'text-amber-400'}>
-                          {a.ready ? t('accounts.ready') : t('accounts.warmingUp')}
+                          {a.ready ? t('accounts.ready') : a.sleeping ? t('accounts.sleeping') : t('accounts.warmingUp')}
                         </Badge>
                       </div>
                     </TableCell>

@@ -41,6 +41,7 @@ import { getTopUsers, getModelUsage } from '../core/usage-tracker.js'
 import { getModelContextWindow } from '../core/model-registry.js'
 import { fetchFullModelCatalog } from './models.js'
 import { sleep } from '../utils/sleep.js'
+import { isAccountHibernated } from '../services/browser-manager.js'
 
 function randomDelay(minMs: number, maxMs: number): number {
   const min = Math.max(0, Math.min(minMs, maxMs))
@@ -213,6 +214,7 @@ async function buildOverview(): Promise<any> {
     cooldownReason: getAccountCooldownInfo(a.id)?.reason ?? null,
     activeLoad: getAccountActiveLoad(a.id),
     ready: isAccountReady(a.id),
+    sleeping: isAccountHibernated(a.id),
     streams: streamCounts.get(a.id) || 0,
   }))
   const inUse = getInUseAccounts()
@@ -307,6 +309,7 @@ adminApp.get('/api/accounts', adminGuard, (c) => {
     cooldownReason: getAccountCooldownInfo(a.id)?.reason ?? null,
     activeLoad: getAccountActiveLoad(a.id),
     ready: isAccountReady(a.id),
+    sleeping: isAccountHibernated(a.id),
   }))
   return c.json({ accounts, inUse: [...getInUseAccounts()], maxStreamsPerAccount: config.accounts.maxStreamsPerAccount })
 })

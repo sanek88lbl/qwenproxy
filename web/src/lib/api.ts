@@ -33,6 +33,7 @@ export interface Account {
   cooldownReason: string | null
   activeLoad: number
   ready?: boolean
+  sleeping?: boolean
   streams?: number
 }
 

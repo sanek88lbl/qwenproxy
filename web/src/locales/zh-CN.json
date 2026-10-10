@@ -185,6 +185,7 @@
     "isolatedLanes": "隔离通道（{{count}}）— 各自拥有独立指纹。",
     "ready": "就绪",
     "warmingUp": "预热中",
+    "sleeping": "休眠中",
     "qwenAccounts": "Qwen 账户",
     "tableId": "ID",
     "tableLoad": "负载",

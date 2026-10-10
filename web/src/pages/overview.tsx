@@ -291,7 +291,7 @@ export function OverviewPage() {
                           {a.ready ? (
                             <Badge variant="outline" className="text-emerald-400">{t('accounts.ready')}</Badge>
                           ) : (
-                            <Badge variant="outline" className="text-amber-400">{t('accounts.warmingUp')}</Badge>
+                            <Badge variant="outline" className="text-amber-400">{a.sleeping ? t('accounts.sleeping') : t('accounts.warmingUp')}</Badge>
                           )}
                         </TableCell>
                         <TableCell className="text-right">

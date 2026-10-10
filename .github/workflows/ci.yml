@@ -55,9 +55,12 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm --prefix web ci
+      - run: npm run typecheck:admin
+      - run: npm run build:admin
       - name: Match Firefox home ownership to the container user
         run: chown "$(id -u):$(id -g)" /github/home
-      - run: npx tsx --test src/tests/e2e/startupBrowsers.test.ts src/tests/e2e/clientHistoryTransport.test.ts src/tests/e2e/streamCancellation.test.ts
+      - run: npx tsx --test src/tests/e2e/startupBrowsers.test.ts src/tests/e2e/clientHistoryTransport.test.ts src/tests/e2e/streamCancellation.test.ts src/tests/e2e/accountReadiness.test.ts
 
   release:
     name: Release

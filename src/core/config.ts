@@ -21,7 +21,7 @@ const envSchema = z.object({
   USER_DATA_DIR: z.string().default('./qwen_profiles'),
   USER_AGENT: z.string().default('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'),
   LOG_CONSOLE: envBool(false),
-  BROWSER_IDLE_HIBERNATE_MS: envInt(300000, 0),
+  BROWSER_IDLE_HIBERNATE_MS: envInt(0, 0),
   NAVIGATION_TIMEOUT: envInt(90000, 1),
   PAGE_TIMEOUT: envInt(60000, 1),
   HTTP_TIMEOUT: envInt(45000, 1),

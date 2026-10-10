@@ -145,6 +145,7 @@
     "add": "Adicionar",
     "ready": "pronta",
     "warmingUp": "aquecendo",
+    "sleeping": "em repouso",
     "qwenAccounts": "Contas Qwen",
     "accountsConfigured": "conta(s) configurada(s)",
     "tableId": "ID",
