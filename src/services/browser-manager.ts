@@ -395,6 +395,9 @@ async function confirmAccountSession(page: Page, email: string): Promise<void> {
 async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
   await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
 
+  const authUrls = ['https://chat.qwen.ai/api/v2/auths/signin', 'https://auth.qwen.ai/api/v2/auths/refresh'];
+  const previousRefreshCookies = (await acctContext.cookies(authUrls)).filter(cookie => cookie.name === 'refresh_token');
+
   const hashedPassword = crypto.createHash('sha256').update(password).digest('hex');
 
   const result = await acctPage.evaluate(async ({ email, password }) => {
@@ -419,6 +422,13 @@ async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Pag
 
   const session = result.data?.data ?? result.data;
   if (result.ok && result.data?.success !== false && typeof session?.token === 'string' && session.token) {
+    const currentCookies = await acctContext.cookies(authUrls);
+    for (const previous of previousRefreshCookies) {
+      if (currentCookies.some(cookie => cookie.name === previous.name && cookie.domain === previous.domain &&
+          cookie.path === previous.path && cookie.value === previous.value)) {
+        await acctContext.clearCookies({ name: previous.name, domain: previous.domain, path: previous.path });
+      }
+    }
     const expiry = Number(session.expires_at);
     const expiresAt = Number.isFinite(expiry) && expiry > 0
       ? (expiry < 1e12 ? expiry * 1000 : expiry)
