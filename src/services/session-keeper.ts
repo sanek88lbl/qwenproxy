@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { accountPages, getPageForAccount, getUiMutex, getBrowser, sleep } from './browser-manager.js';
+import { accountPages, getPageForAccount, getUiMutex, getBrowser, sleep, isAccountHibernated } from './browser-manager.js';
 import { humanMouseMove, humanScroll, humanDelay } from './human-behavior.js';
 import { config } from '../core/config.js';
 import { getRuntimeBool } from '../core/runtime-config.js';
@@ -33,7 +33,7 @@ export async function recoverUnreadyAccounts(
   try {
     for (const account of getAccountsWithCooldownSync()) {
       if (getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly)) return;
-      if (isAccountReady(account.id) || getInUseAccounts().includes(account.id) || getAccountActiveLoad(account.id) > 0 || getAccountCooldownInfo(account.id) || getUiMutex(account.id).isLocked()) continue;
+      if (isAccountReady(account.id) || isAccountHibernated(account.id) || getInUseAccounts().includes(account.id) || getAccountActiveLoad(account.id) > 0 || getAccountCooldownInfo(account.id) || getUiMutex(account.id).isLocked()) continue;
       try {
         await prepare(account);
       } catch (error) {

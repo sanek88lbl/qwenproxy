@@ -16,7 +16,7 @@ process.env.WARM_POOL_SIZE = '0';
 process.env.BROWSER_IDLE_HIBERNATE_MS = '0';
 const { createQwenStream } = await import('../../services/stream-creator.js');
 const { browserStreamFetch } = await import('../../services/stream-bridge.js');
-const { accountPages } = await import('../../services/browser-manager.js');
+const { accountPages, accountContexts, touchAccountActivity, hibernateIdleAccountContexts, getAccountLastActivity } = await import('../../services/browser-manager.js');
 const { getAccountActiveLoad } = await import('../../core/account-manager.js');
 const { closeDatabase } = await import('../../core/database.js');
 after(() => { closeDatabase(); process.chdir(cwd); fs.rmSync(directory, { recursive: true, force: true }); });
@@ -102,6 +102,47 @@ test('actual browser relay tears down requests without affecting adjacent stream
       await secondReader.cancel();
       await until(() => closed.has('second'));
       assert.equal(getAccountActiveLoad('browser-b'), 0);
+    });
+
+    await t.test('idle hibernation preserves an active browser relay and allows hibernation after it finishes', async () => {
+      const separate = await browser.newContext();
+      await separate.grantPermissions(['local-network-access'], { origin: 'https://chat.qwen.ai' });
+      await separate.route('**/*', route => {
+        const url = new URL(route.request().url());
+        if (url.hostname === '127.0.0.1') return route.continue();
+        if (url.pathname === '/' || url.pathname === '/c/new-chat') return route.fulfill({ contentType: 'text/html', body: '<html>fixture</html>' });
+        return route.abort();
+      });
+      await separate.addInitScript(`const fixtureFetch = window.fetch.bind(window); window.fetch = (input, init) => fixtureFetch(String(input).startsWith('https://chat.qwen.ai/api/v2/chat/completions') ? ${JSON.stringify(origin)} + '/completion' : input, init);`);
+      const base = await separate.newPage();
+      await base.goto('https://chat.qwen.ai/');
+      accountPages.set('hibernate-browser', base); accountContexts.set('hibernate-browser', separate); touchAccountActivity('hibernate-browser');
+      const nativeNow = Date.now;
+      let clock = 0;
+      const now = t.mock.method(Date, 'now', () => nativeNow() + clock);
+      try {
+        const result = await create('hibernate-live-stream', 'hibernate-browser');
+        const reader = result.stream.getReader();
+        await reader.read();
+        clock = 300001;
+        assert.equal(await hibernateIdleAccountContexts(300000), 0);
+        assert.equal(base.isClosed(), false);
+        assert.equal(getAccountActiveLoad('hibernate-browser'), 1);
+        responses.get('hibernate-live-stream')!.write('data: still producing after idle deadline\n\n');
+        assert.match(new TextDecoder().decode((await reader.read()).value), /still producing/);
+        responses.get('hibernate-live-stream')!.end();
+        while (!(await reader.read()).done) assert.equal(base.isClosed(), false);
+        assert.equal(getAccountActiveLoad('hibernate-browser'), 0);
+        assert.ok(getAccountLastActivity('hibernate-browser')! >= nativeNow() + clock - 1000);
+        assert.equal(await hibernateIdleAccountContexts(300000), 0, 'the completed request refreshes the idle clock');
+        clock += 300001;
+        assert.equal(await hibernateIdleAccountContexts(300000), 1);
+        assert.equal(base.isClosed(), true);
+        assert.equal(baseA.isClosed(), false);
+        assert.equal(baseB.isClosed(), false);
+      } finally {
+        now.mock.restore(); accountPages.delete('hibernate-browser'); accountContexts.delete('hibernate-browser'); await separate.close();
+      }
     });
 
     await t.test('consumer cancellation before the first chunk', async () => {

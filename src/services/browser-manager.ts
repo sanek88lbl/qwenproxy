@@ -6,7 +6,8 @@ import crypto from 'crypto';
 import { getAccountCredentials, type QwenAccount } from '../core/accounts.js';
 import { config } from '../core/config.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
-import { markAccountNotReady } from '../core/account-manager.js';
+import { markAccountNotReady, markAccountReady, isAccountReady, getAccountActiveLoad, getInUseAccounts } from '../core/account-manager.js';
+import { getStreamRegistry } from '../core/stream-registry.js';
 import { getRuntimeInt, getRuntimeBool } from '../core/runtime-config.js';
 import { getStealthScript } from './stealth.js';
 import { getFingerprintProfile, type FingerprintProfile } from './fingerprint.js';
@@ -614,6 +615,7 @@ export async function initPlaywright(_headless = true, browserType: BrowserType 
 
 export async function closePlaywright() {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return;
+  hibernatedAccounts.clear();
   for (const cache of accountHeaderCaches.values()) {
     cache.refreshInProgress = false;
   }
@@ -657,6 +659,7 @@ export async function dismissAgeModal(page: Page): Promise<void> {
 }
 
 export async function initPlaywrightForAccount(account: QwenAccount, _headless = true, browserType: BrowserType = config.browser.type) {
+  hibernatedAccounts.delete(account.id);
   const priorContext = accountContexts.get(account.id);
   if (priorContext) {
     await priorContext.close().catch(() => {});
@@ -826,6 +829,8 @@ setFingerprintRotationListener((baseId) => {
 });
 
 const accountLastActivity = new Map<string, number>();
+const hibernatedAccounts = new Set<string>();
+export function isAccountHibernated(accountId: string): boolean { return hibernatedAccounts.has(accountId); }
 
 export function touchAccountActivity(accountId?: string): void {
   if (accountId) {
@@ -837,10 +842,18 @@ export function getAccountLastActivity(accountId: string): number | undefined {
   return accountLastActivity.get(accountId);
 }
 
+function hasAccountWork(accountId: string): boolean {
+  const base = getBaseAccountId(accountId) || accountId;
+  return getAccountActiveLoad(accountId) > 0 || getUiMutex(accountId).isLocked() ||
+    getInUseAccounts().some(id => (getBaseAccountId(id) || id) === base) ||
+    [...getStreamRegistry().values()].some(entry => (getBaseAccountId(entry.accountId) || entry.accountId) === base);
+}
+
 export async function hibernateAccountContext(accountId: string): Promise<boolean> {
   const acctContext = accountContexts.get(accountId);
   const acctPage = accountPages.get(accountId);
-  if (!acctContext) return false;
+  if (!acctContext || hasAccountWork(accountId)) return false;
+  const lastActivity = accountLastActivity.get(accountId);
 
   try {
     if (await hasValidAuthCookie(acctPage || null)) {
@@ -848,16 +861,28 @@ export async function hibernateAccountContext(accountId: string): Promise<boolea
     }
   } catch (err: any) {
     console.warn(`[Playwright] Failed saving storage state during hibernation for ${accountId}:`, err.message);
+    return false;
   }
-
+  if (accountContexts.get(accountId) !== acctContext || hasAccountWork(accountId) || accountLastActivity.get(accountId) !== lastActivity) return false;
+  const wasReady = isAccountReady(accountId);
+  hibernatedAccounts.add(accountId);
+  accountContexts.delete(accountId);
+  accountPages.delete(accountId);
+  markAccountNotReady(accountId);
   try {
     await acctContext.close();
   } catch (err: any) {
-    console.warn(`[Playwright] Failed closing context during hibernation for ${accountId}:`, err.message);
+    if (!acctPage?.isClosed()) {
+      if (!accountContexts.has(accountId)) {
+        hibernatedAccounts.delete(accountId);
+        accountContexts.set(accountId, acctContext);
+        if (acctPage) accountPages.set(accountId, acctPage);
+        if (wasReady) markAccountReady(accountId);
+      }
+      console.warn(`[Playwright] Failed closing context during hibernation for ${accountId}:`, err.message);
+      return false;
+    }
   }
-
-  accountContexts.delete(accountId);
-  accountPages.delete(accountId);
   console.log(`[Playwright] Hibernated idle browser context for account ${accountId} (freed RAM).`);
   return true;
 }

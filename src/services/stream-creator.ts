@@ -4,7 +4,7 @@ import { MAX_PAYLOAD_SIZE } from '../core/model-registry.js';
 import { config } from '../core/config.js';
 import { RetryableQwenStreamError, QwenUpstreamError, handleErrorBody, handleJsonErrorBody } from './error-handler.js';
 import { getWarmedChat, releaseWarmChat } from './warm-pool.js';
-import { getClientHintsHeaders } from './browser-manager.js';
+import { getClientHintsHeaders, touchAccountActivity } from './browser-manager.js';
 import type { Page } from 'playwright';
 import { releaseAccountInUse, acquireAccountStreamSlot } from '../core/account-manager.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
@@ -596,6 +596,7 @@ export async function createQwenStream(
   const releaseAccountStreamOnce = () => {
     if (accountStreamReleased) return;
     accountStreamReleased = true;
+    touchAccountActivity(effectiveAccountId);
     accountSlot.release();
   };
 
@@ -619,7 +620,7 @@ export async function createQwenStream(
     label: string,
     abortTransport?: (cancelled: boolean) => void | Promise<void>,
   ) => manageQwenStream(stream, controller, timeoutMs, label, abortTransport,
-    releaseStreamResources, () => accountSlot.touch(), options?.signal);
+    releaseStreamResources, () => { accountSlot.touch(); touchAccountActivity(effectiveAccountId); }, options?.signal);
 
   try {
   options?.signal?.throwIfAborted();
