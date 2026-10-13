@@ -306,15 +306,27 @@ export class Mutex {
     return this.locked;
   }
 
-  async acquire(): Promise<() => void> {
-    if (!this.locked) {
-      this.locked = true;
-      return () => this.release();
-    }
-    return new Promise<() => void>(resolve => {
-      this.queue.push(() => {
-        resolve(() => this.release());
-      });
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    signal?.throwIfAborted();
+    return new Promise<() => void>((resolve, reject) => {
+      const abort = () => {
+        const index = this.queue.indexOf(grant);
+        if (index >= 0) this.queue.splice(index, 1);
+        signal?.removeEventListener('abort', abort);
+        reject(signal?.reason ?? new Error('UI wait cancelled'));
+      };
+      const grant = () => {
+        signal?.removeEventListener('abort', abort);
+        this.locked = true;
+        let released = false;
+        resolve(() => { if (!released) { released = true; this.release(); } });
+      };
+      if (!this.locked) grant();
+      else {
+        this.queue.push(grant);
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+      }
     });
   }
 

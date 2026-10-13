@@ -31,7 +31,7 @@ import { getPersonalization, savePersonalization, applyPersonalizationToAccount,
 import { listUsers, upsertUser, deleteUserById, getUserById, listSessions } from '../core/database.js'
 import { getUserActiveStreams, getUserPrincipal, getTotalUserActiveStreams } from '../core/user-manager.js'
 import { getSessionCount, removeSession, resetAllSessions } from '../services/session-manager.js'
-import { getStreamRegistry, abortStream } from '../core/stream-registry.js'
+import { getStreamRegistry, abortStream, getRequestPreparationStats } from '../core/stream-registry.js'
 import { getRecentToolCalls } from '../core/tool-call-debug.js'
 import { getAllSeries } from '../core/time-series.js'
 import { readEnvFile, persistEnvPatch, restartServer, SETTINGS_ALLOWLIST, SETTINGS_SECRETS, BOOLEAN_KEYS, INTEGER_KEYS } from '../core/env-settings.js'
@@ -174,6 +174,7 @@ adminApp.get('/api/session', (c) => {
     authenticated: verifySession(c),
     enabled: true,
     uptime: Math.floor(process.uptime()),
+    requestPreparation: getRequestPreparationStats(),
     version: readPackageVersion(),
   })
 })

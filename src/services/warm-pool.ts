@@ -6,7 +6,7 @@ import { QwenUpstreamError } from './error-handler.js';
 import { getClientHintsHeaders } from './browser-manager.js';
 import type { Page } from 'playwright';
 import crypto from 'crypto';
-import { sleep } from '../utils/sleep.js';
+import { sleep, abortable } from '../utils/sleep.js';
 import { CACHED_TIMEZONE, QWEN_WEB_VERSION } from '../utils/qwen-constants.js';
 
 export interface WarmPoolEntry {
@@ -359,11 +359,13 @@ async function refillPoolForAccount(accountId: string) {
   }
 }
 
-export async function getWarmedChat(accountId?: string) {
+export async function getWarmedChat(accountId?: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   if (getPoolSize() <= 0) {
     const acctId = accountId === 'global' ? undefined : accountId;
     const headers = await getBasicQwenHeaders(acctId);
     const chatId = await createRealQwenChat(headers, acctId);
+    signal?.throwIfAborted();
     const key = accountId || 'global';
     markWarmChatInFlight(key, chatId);
     return { chatId, headers, accountId: key, timestamp: Date.now() };
@@ -382,16 +384,19 @@ export async function getWarmedChat(accountId?: string) {
     if (!refillPromises.has(key)) {
       refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
     }
-    await refillPromises.get(key);
+    const refill = refillPromises.get(key)!;
+    await (signal ? abortable(refill, signal) : refill);
   }
   if (pool.length === 0) {
     await new Promise(r => setTimeout(r, 200));
     if (!refillPromises.has(key)) {
       refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
     }
-    await refillPromises.get(key);
+    const refill = refillPromises.get(key)!;
+    await (signal ? abortable(refill, signal) : refill);
   }
   if (pool.length === 0) throw new Error(`Warm pool empty after retry for ${key}`);
+  signal?.throwIfAborted();
   const entry = pool.shift()!;
   markWarmChatInFlight(key, entry.chatId);
   return entry;

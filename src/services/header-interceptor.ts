@@ -1,5 +1,5 @@
 import { config } from '../core/config.js';
-import { getActiveAccountCount, markAccountReady, markAccountNotReady } from '../core/account-manager.js';
+import { markAccountReady, markAccountNotReady } from '../core/account-manager.js';
 import { getBaseAccountId } from '../core/account-lanes.js';
 import {
   CHROME_UA,
@@ -23,8 +23,6 @@ import {
   loadStorageState,
   sharedContextOptions,
   getUiMutex,
-  resetBrowserProfile,
-  initPlaywright,
   initPlaywrightForAccount,
   loginToQwenWithContext,
   dismissAgeModal,
@@ -33,6 +31,19 @@ import { getStealthScript } from './stealth.js';
 import { startCaptchaWatcher } from './captcha-solver.js';
 import { humanType, humanDelay } from './human-behavior.js';
 import { getFingerprintProfile } from './fingerprint.js';
+import { abortable } from '../utils/sleep.js';
+import { QwenUpstreamError } from './error-handler.js';
+import type { Page } from 'playwright';
+
+async function finishHeaderRoute(page: Page, pattern: string, handler: any, route: any, signal?: AbortSignal): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new QwenUpstreamError('Header capture cleanup did not finish.', 'HeaderCaptureCleanupFailed', 502)), Math.min(5000, config.timeouts.http));
+  try {
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    await abortable(Promise.all([route.abort('aborted'), page.unroute(pattern, handler)]), combined);
+    combined.throwIfAborted();
+  } finally { clearTimeout(timer); }
+}
 
 export async function getCookies(accountId?: string): Promise<string> {
   if (process.env.TEST_MOCK_PLAYWRIGHT) return 'token=mock';
@@ -105,7 +116,8 @@ export async function getBasicHeaders(accountId?: string): Promise<{ cookie: str
   return { cookie, userAgent, bxV, bxUa, bxUmidtoken };
 }
 
-export async function getGuestHeaders(): Promise<Record<string, string>> {
+export async function getGuestHeaders(signal?: AbortSignal): Promise<Record<string, string>> {
+  signal?.throwIfAborted();
   const cached = getGuestHeadersCache();
   if (cached && (Date.now() - cached.timestamp) < GUEST_HEADERS_TTL) {
     return cached.headers;
@@ -137,7 +149,8 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
     } catch { /* ignore popup errors */ }
   }
 
-  const watcher = startCaptchaWatcher(guestPage!, config.timeouts.headers);
+  const watcher = startCaptchaWatcher(guestPage!, config.timeouts.headers, signal);
+  let detachAbort = () => {};
   try {
     return await new Promise<Record<string, string>>((resolve, reject) => {
       let settled = false;
@@ -145,9 +158,7 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
         if (settled) return;
         settled = true;
         void guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
-        resetBrowserProfile('guest', 'guest')
-          .catch((err: any) => console.warn(`[Playwright] Failed to reset guest profile after timeout: ${err.message}`))
-          .finally(() => reject(new Error('Timeout getting guest headers')));
+        reject(new Error('Timeout getting guest headers'));
       }, config.timeouts.headers);
 
       const routeHandler = async (route: any, request: any) => {
@@ -165,9 +176,9 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
           }
           settled = true;
           clearTimeout(timeout);
+          reject(error);
           await route.continue().catch(() => {});
           await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
-          reject(error);
           return;
         }
         if (settled) {
@@ -188,13 +199,13 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
 
         if (extractedHeaders['bx-ua']) {
           console.log('[Playwright] Guest: Successfully captured bx-ua');
-          setGuestHeadersCache({ headers: extractedHeaders, timestamp: Date.now() });
-          await route.abort('aborted').catch(() => {});
-          await guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
-
-          import('./qwen.js').then(m => m.disableNativeTools('guest').catch(() => {}));
-
-          resolve(extractedHeaders);
+          try {
+            await finishHeaderRoute(guestPage!, '**/api/v2/chat/completions*', routeHandler, route, signal);
+            signal?.throwIfAborted();
+            setGuestHeadersCache({ headers: extractedHeaders, timestamp: Date.now() });
+            import('./qwen.js').then(m => m.disableNativeTools('guest').catch(() => {}));
+            resolve(extractedHeaders);
+          } catch (error) { reject(error); }
         } else {
           console.log('[Playwright] Guest: Request missing bx-ua, continuing route. Headers:', Object.keys(reqHeaders));
           await route.continue().catch(() => {});
@@ -204,6 +215,17 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
           }
         }
       };
+
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        void guestPage!.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+        reject(signal?.reason ?? new Error('Guest header capture cancelled'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      detachAbort = () => signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) { onAbort(); return; }
 
       guestPage!.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
         const inputSelector = 'textarea:visible, [contenteditable="true"]:visible';
@@ -235,13 +257,15 @@ export async function getGuestHeaders(): Promise<Record<string, string>> {
       });
     });
   } finally {
+    detachAbort();
     watcher.stop();
   }
 }
 
-export async function getQwenHeaders(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
+export async function getQwenHeaders(forceNew = false, accountId?: string, signal?: AbortSignal): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
+  signal?.throwIfAborted();
   if (accountId === 'guest') {
-    const headers = await getGuestHeaders();
+    const headers = await getGuestHeaders(signal);
     return { headers, chatSessionId: 'guest-session', parentMessageId: null };
   }
 
@@ -263,12 +287,12 @@ export async function getQwenHeaders(forceNew = false, accountId?: string): Prom
     }
   }
 
-  const release = await getUiMutex(cacheKey).acquire();
+  const release = await getUiMutex(cacheKey).acquire(signal);
   try {
     if (!forceNew && cache.cachedQwenHeaders && (Date.now() - cache.lastHeadersTime < getHeadersTtlMs())) {
       return cache.cachedQwenHeaders;
     }
-    return await _getQwenHeadersInternal(forceNew, accountId);
+    return await _getQwenHeadersInternal(forceNew, accountId, signal);
   } finally {
     release();
   }
@@ -316,36 +340,12 @@ async function tryLightweightCookieRefresh(accountId?: string): Promise<{ header
   return null;
 }
 
-const MAX_HEADER_CAPTURE_RETRIES = 2;
-
-async function _getQwenHeadersInternal(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
-  const cacheKey = accountId || 'global';
-  let lastError: any;
-
-  for (let attempt = 0; attempt <= MAX_HEADER_CAPTURE_RETRIES; attempt++) {
-    try {
-      return await _getQwenHeadersInternalOnce(forceNew || attempt > 0, accountId);
-    } catch (err: any) {
-      lastError = err;
-      const isTimeout = err?.message?.includes('Timeout waiting for Qwen headers for');
-
-      if (attempt < MAX_HEADER_CAPTURE_RETRIES && isTimeout) {
-        console.warn(`[Playwright] Header capture timed out for ${cacheKey}; clearing browser profile and retrying (attempt ${attempt + 1}/${MAX_HEADER_CAPTURE_RETRIES})...`);
-        await resetBrowserProfile(cacheKey, accountId);
-        if (!accountId && getActiveAccountCount() === 0) {
-          await initPlaywright(config.browser.headless, config.browser.type);
-        }
-        continue;
-      }
-
-      break;
-    }
-  }
-
-  throw lastError || new Error(`Header capture failed for ${cacheKey} after ${MAX_HEADER_CAPTURE_RETRIES + 1} attempts`);
+async function _getQwenHeadersInternal(forceNew = false, accountId?: string, signal?: AbortSignal): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
+  signal?.throwIfAborted();
+  return _getQwenHeadersInternalOnce(forceNew, accountId, signal);
 }
 
-async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
+async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string, signal?: AbortSignal): Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }> {
   const cacheKey = accountId || 'global';
   const cache = getAccountHeaderCache(cacheKey);
 
@@ -435,7 +435,8 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
     }
   }
 
-  const watcher = startCaptchaWatcher(page, config.timeouts.headers);
+  const watcher = startCaptchaWatcher(page, config.timeouts.headers, signal);
+  let detachAbort = () => {};
   try {
     return await new Promise<{ headers: Record<string, string>, chatSessionId: string, parentMessageId: string | null }>((resolve, reject) => {
       let settled = false;
@@ -444,21 +445,21 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
         settled = true;
         void page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
         console.error(`[Playwright] Timeout waiting for Qwen headers for ${cacheKey}. Current URL:`, page.url());
+        reject(new Error(`Timeout waiting for Qwen headers for ${cacheKey}`));
         try {
           const path = await import('path');
           const { PROFILES_DIR } = await import('./browser-manager.js');
           const screenshotPath = path.join(PROFILES_DIR, `error_${cacheKey}.png`);
-          await page.screenshot({ path: screenshotPath });
+          await page.screenshot({ path: screenshotPath, timeout: Math.min(5000, config.timeouts.page) });
           console.log(`[Playwright] Error screenshot saved to ${screenshotPath}`);
         } catch (err: any) {
           console.error('[Playwright] Failed to save error screenshot:', err.message);
         }
-        reject(new Error(`Timeout waiting for Qwen headers for ${cacheKey}`));
       }, config.timeouts.headers);
 
       console.log(`[Playwright] Setting up route interception for ${cacheKey}...`);
       const routeHandler = async (route: any, request: any) => {
-        if (settled) {
+        if (settled || signal?.aborted) {
           await route.continue().catch(() => {});
           return;
         }
@@ -472,12 +473,12 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           }
           settled = true;
           clearTimeout(timeout);
+          reject(error);
           await route.continue().catch(() => {});
           await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
-          reject(error);
           return;
         }
-        if (settled) {
+        if (settled || signal?.aborted) {
           await route.continue().catch(() => {});
           return;
         }
@@ -516,30 +517,43 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
         clearTimeout(timeout);
 
         console.log(`[Playwright] Successfully intercepted headers for ${cacheKey}.`);
-        cache.currentHeaders = extractedHeaders;
-        cache.cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };
-        cache.lastHeadersTime = Date.now();
-        cache.refreshInProgress = false;
-        markAccountReady(cacheKey);
-
-        import('./qwen.js').then(m => m.disableNativeTools(accountId).catch(() => {}));
-
-        await route.abort('aborted').catch(() => {});
-
-        await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
-
-        resolve(cache.cachedQwenHeaders);
+        try {
+          await finishHeaderRoute(page, '**/api/v2/chat/completions*', routeHandler, route, signal);
+          signal?.throwIfAborted();
+          cache.currentHeaders = extractedHeaders;
+          cache.cachedQwenHeaders = { headers: extractedHeaders, chatSessionId: uiSessionId, parentMessageId: uiParentMessageId };
+          cache.lastHeadersTime = Date.now();
+          cache.refreshInProgress = false;
+          markAccountReady(cacheKey);
+          import('./qwen.js').then(m => m.disableNativeTools(accountId).catch(() => {}));
+          resolve(cache.cachedQwenHeaders);
+        } catch (error) { reject(error); }
       };
 
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        void page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
+        reject(signal?.reason ?? new Error('Header capture cancelled'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      detachAbort = () => signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) { onAbort(); return; }
+
       page.route('**/api/v2/chat/completions*', routeHandler).then(async () => {
+        if (settled) return;
         console.log(`[Playwright] Triggering request for ${cacheKey}...`);
         const inputSelector = 'textarea.message-input-textarea, textarea:visible, [contenteditable="true"]:visible';
         try {
           await dismissAgeModal(page);
           await page.waitForSelector(inputSelector, { timeout: config.timeouts.page });
+          if (settled) return;
           await humanType(page, inputSelector, 'Hello');
+          if (settled) return;
           console.log(`[Playwright] Typed human text for ${cacheKey}, waiting for UI to update...`);
           await sleep(humanDelay(1500, 2500));
+          if (settled) return;
 
           const selectors = [
             '.message-input-right-button-send .send-button',
@@ -551,6 +565,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           for (const selector of selectors) {
             try {
               const btn = await page.$(selector);
+              if (settled) return;
               if (btn && await btn.isVisible()) {
                 console.log(`[Playwright] Attempting click on: ${selector}`);
 
@@ -561,8 +576,7 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
                     element.click();
                   }
                 }, selector);
-
-                await btn.click({ force: true, delay: humanDelay(30, 80) }).catch(() => {});
+                if (settled) return;
 
                 clicked = true;
                 break;
@@ -581,12 +595,13 @@ async function _getQwenHeadersInternalOnce(forceNew = false, accountId?: string)
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
-          await page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
           reject(e);
+          void page.unroute('**/api/v2/chat/completions*', routeHandler).catch(() => {});
         }
-      });
+      }).catch(error => { if (!settled) { settled = true; clearTimeout(timeout); reject(error); } });
     });
   } finally {
+    detachAbort();
     watcher.stop();
   }
 }

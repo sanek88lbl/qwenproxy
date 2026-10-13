@@ -85,7 +85,7 @@ export function markAccountRateLimited(accountId: string, cooldownMs?: number, r
     }
   }
 
-  console.log(`[AccountManager] Account ${accountId} marked as rate-limited. Cooldown until ${new Date(until).toISOString()}`)
+  console.log(`[AccountManager] Account ${accountId} cooldown (${cooldownReason}) until ${new Date(until).toISOString()}`)
 }
 
 export function clearAccountCooldown(accountId: string): void {

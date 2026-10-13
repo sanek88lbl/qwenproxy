@@ -10,6 +10,7 @@ import { sleep } from '../utils/sleep.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
 import { Watchdog } from '../core/watchdog.js'
+import { getRequestPreparationStats } from '../core/stream-registry.js'
 import { app as modelsApp } from './models.js'
 import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
 import { uploadFile } from '../routes/upload.js'
@@ -100,6 +101,7 @@ app.get('/health', async (c) => {
   return c.json({
     status: status?.overall || 'unknown',
     timestamp: Date.now(),
+    requestPreparation: getRequestPreparationStats(),
     metrics: {
       cache: await cache?.getStats(),
     },

@@ -13,7 +13,7 @@ import { prepareConversationMessage, serializeConversationMessages, Conversation
 import { OVERLOAD_COOLDOWN_MS } from '../utils/overload-detector.js';
 import { getNextAccount, getNextAvailableAccount, getAccountById, onAccountFreed, getAccountCooldownInfo, markAccountInUse, releaseAccountInUse, getInUseAccounts } from '../core/account-manager.js';
 import { loadAccounts } from '../core/accounts.js';
-import { registerStream, removeStream, getStream, findStream } from '../core/stream-registry.js';
+import { registerStream, removeStream, getStream, findStream, beginRequestPreparation, endRequestPreparation } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
 import { config } from '../core/config.js';
 
@@ -117,7 +117,12 @@ export async function chatCompletions(c: Context) {
   let operationFinished = false;
   let userSlotHeld = false;
   let userSlotReleased = false;
+  let preparationTimer: ReturnType<typeof setTimeout> | undefined;
+  const completionId = 'chatcmpl-' + crypto.randomUUID();
   const releaseUserSlotOnce = () => {
+    clearTimeout(preparationTimer);
+    preparationTimer = undefined;
+    endRequestPreparation(completionId);
     operationFinished = true;
     detachAbort();
     if (activeCompletionId && getStream(activeCompletionId)) return;
@@ -155,6 +160,16 @@ export async function chatCompletions(c: Context) {
     }
     
     const requestController = new AbortController();
+    const armPreparationDeadline = () => {
+      if (preparationTimer) return;
+      beginRequestPreparation(completionId);
+      preparationTimer = setTimeout(() => {
+        metrics.increment('requests.preparation.timeouts');
+        console.warn(`[Chat] Preparation deadline exceeded for ${completionId}.`);
+        requestController.abort(new QwenUpstreamError('Qwen request preparation exceeded its deadline.', 'RequestPreparationTimeout', 504));
+      }, config.timeouts.preparation);
+    };
+    armPreparationDeadline();
     const clientSignal = c.req.raw.signal;
     const onClientAbort = () => requestController.abort(clientSignal.reason);
     clientSignal.addEventListener('abort', onClientAbort, { once: true });
@@ -163,7 +178,11 @@ export async function chatCompletions(c: Context) {
     const rawSessionKey = typeof body.user === 'string' && body.user.trim()
       ? body.user.trim() : (c.req.header('x-qwen-session') || c.req.header('x-session-id') || undefined);
     const sessionKey = rawSessionKey ? resolveOwnedSessionKey(principal, rawSessionKey) : undefined;
-    if (sessionKey) sessionLease = await acquireSessionLease(sessionKey, requestController.signal);
+    if (sessionKey) {
+      beginRequestPreparation(completionId, true);
+      sessionLease = await acquireSessionLease(sessionKey, requestController.signal);
+      beginRequestPreparation(completionId);
+    }
     requestController.signal.throwIfAborted();
     const messages = body.messages || [];
     const prepared = messages.map(prepareConversationMessage);
@@ -357,7 +376,6 @@ export async function chatCompletions(c: Context) {
     const baseStreamOptions = { sessionKey, sessionLease, sessionOwner: principal, economicalPrompt, prepareBootstrap, instructionsHash, signal: requestController.signal };
 
     const isGuestModeOnly = getRuntimeBool('QWEN_GUEST_MODE_ONLY', config.guestModeOnly);
-    const completionId = 'chatcmpl-' + crypto.randomUUID();
     activeCompletionId = completionId;
     const stopToken = crypto.randomUUID();
     const registerActiveStream = async (result: Awaited<ReturnType<typeof createQwenStream>>) => {
@@ -380,8 +398,12 @@ export async function chatCompletions(c: Context) {
           await result.cancel(reason);
         },
       });
+      clearTimeout(preparationTimer);
+      preparationTimer = undefined;
+      endRequestPreparation(completionId);
     };
     const prepareStreamAttempt = async () => {
+      armPreparationDeadline();
       requestController.signal.throwIfAborted();
       const previous = getStream(completionId);
       if (previous?.cleanup) {
@@ -513,9 +535,10 @@ export async function chatCompletions(c: Context) {
               if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
                 const hourHint = err.message?.match(/Wait about (\d+) hour/);
                 const hours = hourHint ? parseInt(hourHint[1]) : 24;
-                const cooldownMs = hours * 60 * 60 * 1000;
-                recordAccountBlock(accountId, 'rate-limited', err.message, { cooldownMs });
-                console.warn(`[Chat] Account ${accountEmail} (${accountId}) rate-limited. Entering cooldown for ${hours} hours.`);
+                const cooldownMs = err.retryAfterMs ?? hours * 60 * 60 * 1000;
+                recordAccountBlock(accountId, 'rate-limited', err.message, { cooldownMs,
+                  providerCode: err.upstreamCode, providerStatus: err.upstreamStatus,
+                  cooldownBasis: err.retryAfterMs !== undefined ? 'retry-after-header' : hourHint ? 'provider-hour-hint' : 'fallback-24h' });
                 lastError = err;
                 break;
               }
@@ -523,8 +546,8 @@ export async function chatCompletions(c: Context) {
               // Hard anti-bot block (captcha / TMD challenge). Quarantine AND rotate
               // the account's fingerprint + reset its browser context so recovery is
               // as a fresh device — this prevents the flag from re-propagating.
-              if (err instanceof QwenUpstreamError && err.upstreamStatus === 403) {
-                recordAccountBlock(accountId, 'captcha', err.message);
+              if (err instanceof QwenUpstreamError && err.upstreamCode === 'FAIL_SYS_USER_VALIDATE') {
+                recordAccountBlock(accountId, 'captcha', err.message, { providerCode: err.upstreamCode, providerStatus: err.upstreamStatus });
                 console.warn(`[Chat] Account ${accountEmail} (${accountId}) hit an anti-bot challenge. Quarantined with fingerprint rotation.`);
                 lastError = err;
                 break;
@@ -602,7 +625,9 @@ export async function chatCompletions(c: Context) {
       return { stream: retried.stream, uiSessionId: retried.uiSessionId };
     };
     const quarantineDailyQuota = (accountId: string) => {
-      recordAccountBlock(accountId, 'rate-limited', 'Qwen returned a daily chat quota notice', { cooldownMs: msUntilMidnight() });
+      recordAccountBlock(accountId, 'rate-limited', 'Qwen returned a daily chat quota notice', {
+        cooldownMs: msUntilMidnight(), providerCode: 'DailyQuotaNotice', cooldownBasis: `daily-reset-server-timezone:${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+      });
     };
 
     c.header('X-Stop-Token', stopToken);
@@ -854,7 +879,7 @@ export async function chatCompletions(c: Context) {
     metrics.histogram('latency.completion', Date.now() - completionStart)
     trackUsage(user ? user.id : 'anonymous', usageInputText, true);
     trackModelUsage(usageModel);
-    return c.json({ error: { message: err.message, ...(err instanceof ConversationContextError ? { code: err.upstreamCode } : {}) } }, status)
+    return c.json({ error: { message: err.message, ...(err instanceof ConversationContextError || err instanceof QwenUpstreamError ? { code: err.upstreamCode } : {}) } }, status)
   }
 }
 

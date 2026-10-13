@@ -132,7 +132,7 @@ export function recordAccountBlock(
   accountId: string,
   type: BlockType,
   detail?: string,
-  opts?: { cooldownMs?: number },
+  opts?: { cooldownMs?: number; providerCode?: string; providerStatus?: number; cooldownBasis?: string },
 ): BlockResult {
   const base = getBaseAccountId(accountId) || accountId;
   const s = getState(base);
@@ -157,6 +157,10 @@ export function recordAccountBlock(
 
   // Quarantine ONLY this account (markAccountRateLimited also pins the base id).
   markAccountRateLimited(base, cooldownMs, blockReason(type));
+  const providerCode = opts?.providerCode && /^[\w.-]{1,64}$/.test(opts.providerCode) ? opts.providerCode : undefined;
+  console.warn('[Isolation] Quarantine:', JSON.stringify({ accountId: base, reason: blockReason(type),
+    cooldownMs, cooldownBasis: opts?.cooldownBasis ?? (hard ? 'captcha-policy' : 'fallback-policy'),
+    providerCode, providerStatus: opts?.providerStatus, escalated }));
   s.quarantinedAt = Date.now();
 
   let fingerprintRotated = false;

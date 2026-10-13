@@ -16,6 +16,29 @@ export interface StreamRegistryEntry {
 
 const activeStreams = new Map<string, StreamRegistryEntry>();
 const knownStreamAccounts = new Set<string>();
+const preparations = new Map<string, { started: number; waitingForSession: boolean }>();
+
+export function beginRequestPreparation(id: string, waitingForSession = false): void {
+  preparations.set(id, { started: preparations.get(id)?.started ?? Date.now(), waitingForSession });
+  updatePreparationGauges();
+}
+
+export function endRequestPreparation(id: string): void {
+  preparations.delete(id);
+  updatePreparationGauges();
+}
+
+export function getRequestPreparationStats(): { active: number; waitingForSession: number; oldestAgeMs: number } {
+  const entries = [...preparations.values()];
+  return { active: entries.length, waitingForSession: entries.filter(entry => entry.waitingForSession).length,
+    oldestAgeMs: entries.length ? Date.now() - Math.min(...entries.map(entry => entry.started)) : 0 };
+}
+
+function updatePreparationGauges(): void {
+  const stats = getRequestPreparationStats();
+  metrics.gauge('requests.preparing', stats.active);
+  metrics.gauge('requests.waiting.session', stats.waitingForSession);
+}
 
 function updateStreamGauges(): void {
   const byAccount = new Map<string, number>();

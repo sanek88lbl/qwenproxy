@@ -35,6 +35,10 @@ export class Metrics extends EventEmitter {
       ['requests.4xx', 'counter', 'Requests answered with 4xx status'],
       ['requests.5xx', 'counter', 'Requests answered with 5xx status'],
       ['requests.completions', 'counter', 'Chat completions requests'],
+      ['requests.preparing', 'gauge', 'Requests waiting for upstream response metadata'],
+      ['requests.waiting.session', 'gauge', 'Requests waiting for another operation on the same session'],
+      ['requests.preparation.timeouts', 'counter', 'Request preparation deadlines exceeded'],
+      ['isolation.blocks', 'counter', 'Account quarantine events'],
       ['latency.request', 'histogram', 'Request latency (ms)'],
       ['latency.completion', 'histogram', 'Completion latency to response start (ms)'],
       ['streams.active', 'gauge', 'Active SSE streams'],
@@ -163,13 +167,11 @@ export class Metrics extends EventEmitter {
         if (metric.type === 'histogram' && typeof point.value === 'object' && point.value !== null) {
           const data = point.value as { count: number; sum: number; buckets: Map<number, number> }
           const buckets = metric.histogramBuckets || []
-          let cumulative = 0
           for (const bucket of buckets) {
-            cumulative += data.buckets.get(bucket) || 0
             const bucketLabels = point.labels
               ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')},le="${bucket}"}`
               : `{le="${bucket}"}`
-            output += `${metric.name}_bucket${bucketLabels} ${cumulative}\n`
+            output += `${metric.name}_bucket${bucketLabels} ${data.buckets.get(bucket) || 0}\n`
           }
           const infLabels = point.labels
             ? `{${Object.entries(point.labels).map(([k, v]) => `${k}="${v}"`).join(',')},le="+Inf"}`

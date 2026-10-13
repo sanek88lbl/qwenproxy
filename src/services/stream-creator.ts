@@ -162,7 +162,7 @@ async function tryDirectCompletionFetch(
       return undefined;
     }
     if (!response.ok) {
-      handleErrorBody(bodyText, response.status);
+      handleErrorBody(bodyText, response.status, response.headers.get('retry-after'));
     }
     recordDirectFetchFailure(accountId);
     return undefined;
@@ -632,7 +632,7 @@ export async function createQwenStream(
   if (needsFileUpload) {
     speculativeUpload = (async () => {
       try {
-        const { headers } = await getQwenHeaders(false, accountId);
+        const { headers } = await getQwenHeaders(false, accountId, options?.signal);
         const uploadHeaders: Record<string, string> = {
           cookie: headers['cookie'] || '',
           'user-agent': headers['user-agent'] || '',
@@ -641,7 +641,7 @@ export async function createQwenStream(
           'bx-v': headers['bx-v'] || '',
         };
         if (!uploadHeaders['bx-ua']) {
-          const { headers: refreshed } = await getQwenHeaders(true, accountId);
+          const { headers: refreshed } = await getQwenHeaders(true, accountId, options?.signal);
           Object.assign(uploadHeaders, {
             cookie: refreshed['cookie'] || uploadHeaders['cookie'],
             'user-agent': refreshed['user-agent'] || uploadHeaders['user-agent'],
@@ -741,7 +741,7 @@ export async function createQwenStream(
     }
   } else {
     try {
-      leasedChat = await getWarmedChat(accountId);
+      leasedChat = await getWarmedChat(accountId, options?.signal);
     } catch (err: any) {
       if (err.message?.includes('chat is in progress') || err.message?.includes('The chat is in progress')) {
         const retryAfterMs = 2000 + Math.floor(Math.random() * 2000);
@@ -790,7 +790,7 @@ export async function createQwenStream(
           };
           if (!uploadHeaders['bx-ua']) {
             console.warn('[Qwen] Missing bx-ua header for large prompt upload, attempting forced refresh...');
-            const { headers: refreshedHeaders } = await getQwenHeaders(true, accountId);
+            const { headers: refreshedHeaders } = await getQwenHeaders(true, accountId, options?.signal);
             Object.assign(uploadHeaders, {
               cookie: refreshedHeaders['cookie'] || uploadHeaders['cookie'],
               'user-agent': refreshedHeaders['user-agent'] || uploadHeaders['user-agent'],
@@ -815,7 +815,7 @@ export async function createQwenStream(
   if (pendingMultimodal && pendingMultimodal.length > 0) {
     try {
       const { processImagesForQwen } = await import('../routes/upload.js');
-      const { headers: fullHeaders } = await getQwenHeaders(false, accountId);
+      const { headers: fullHeaders } = await getQwenHeaders(false, accountId, options?.signal);
       const uploadHeaders: Record<string, string> = {
         cookie: fullHeaders['cookie'] || chatHeaders['cookie'] || '',
         'user-agent': fullHeaders['user-agent'] || chatHeaders['user-agent'] || '',
@@ -825,7 +825,7 @@ export async function createQwenStream(
       };
       if (!uploadHeaders['bx-ua']) {
         console.warn('[Qwen] Missing bx-ua header for multimodal upload, attempting forced refresh...');
-        const { headers: refreshedHeaders } = await getQwenHeaders(true, accountId);
+        const { headers: refreshedHeaders } = await getQwenHeaders(true, accountId, options?.signal);
         uploadHeaders['cookie'] = refreshedHeaders['cookie'] || uploadHeaders['cookie'];
         uploadHeaders['user-agent'] = refreshedHeaders['user-agent'] || uploadHeaders['user-agent'];
         uploadHeaders['bx-ua'] = refreshedHeaders['bx-ua'];
@@ -855,6 +855,7 @@ export async function createQwenStream(
     }
   }
 
+  options?.signal?.throwIfAborted();
   if (sessionKey && !useEconomical) {
     setSession(sessionKey, {
       chatId,
@@ -966,7 +967,20 @@ export async function createQwenStream(
       : await waitForAccountPage(effectiveAccountId, 15000);
     options?.signal?.throwIfAborted();
     if (page) {
-      const completionPage = await acquireCompletionPage(page, () => openIsolatedQwenPage(page, 'https://chat.qwen.ai/c/new-chat', options?.signal));
+      let activeBasePage = page;
+      let completionPage = await acquireCompletionPage(page, () => openIsolatedQwenPage(page, 'https://chat.qwen.ai/c/new-chat', options?.signal));
+      const refreshCompletionHeaders = async () => {
+        const fresh = await getQwenHeaders(true, accountId, options?.signal);
+        options?.signal?.throwIfAborted();
+        const currentBase = getPageForAccount(accountId);
+        if (!currentBase || currentBase.isClosed()) throw new QwenUpstreamError('Account browser context is unavailable after header refresh.', 'BrowserRecoveryFailed', 502);
+        if (currentBase !== activeBasePage || completionPage.isClosed()) {
+          await releaseCompletionPage(activeBasePage, completionPage, false);
+          activeBasePage = currentBase;
+          completionPage = await acquireCompletionPage(currentBase, () => openIsolatedQwenPage(currentBase, 'https://chat.qwen.ai/c/new-chat', options?.signal));
+        }
+        return fresh;
+      };
       let streamTransferred = false;
       try {
         const browserResult = await browserStreamFetch(completionPage, url, {
@@ -985,7 +999,7 @@ export async function createQwenStream(
             ...wrapLeasedStream(browserResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async cancelled => {
               let reusable = false;
               try { await browserResult.abort(); reusable = !cancelled; }
-              finally { await releaseCompletionPage(page, completionPage, reusable); }
+              finally { await releaseCompletionPage(activeBasePage, completionPage, reusable); }
             }),
             headers: chatHeaders,
             uiSessionId: chatId,
@@ -1000,7 +1014,7 @@ export async function createQwenStream(
             console.warn('[Qwen] TMD challenge detected via browser, attempting captcha solve before retry...');
             try {
               await solveTmdChallengeIfPresent(completionPage, `chat ${chatId}`);
-              const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
+              const { headers: freshHeaders } = await refreshCompletionHeaders();
               await sleep(500 + Math.floor(Math.random() * 1000));
               const retryResult = await browserStreamFetch(completionPage, url, {
                 method: 'POST',
@@ -1011,13 +1025,14 @@ export async function createQwenStream(
                 signal: options?.signal,
               });
               if (retryResult.contentType.includes('text/event-stream') && retryResult.status < 400) {
+                console.log('[Qwen] Recovery request accepted as an SSE response.');
                 const controller = new AbortController();
                 streamTransferred = true;
                 return {
                   ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async cancelled => {
                     let reusable = false;
                     try { await retryResult.abort(); reusable = !cancelled; }
-                    finally { await releaseCompletionPage(page, completionPage, reusable); }
+                    finally { await releaseCompletionPage(activeBasePage, completionPage, reusable); }
                   }),
                   headers: freshHeaders,
                   uiSessionId: chatId,
@@ -1030,22 +1045,24 @@ export async function createQwenStream(
                 throw new QwenUpstreamError('Qwen TMD challenge persists after captcha solve and header refresh.', 'FAIL_SYS_USER_VALIDATE', 403);
               }
               if (retryResult.body) {
-                handleErrorBody(retryResult.body, retryResult.status);
+                handleErrorBody(retryResult.body, retryResult.status, retryResult.headers['retry-after']);
               }
             } catch (retryErr) {
               if (retryErr instanceof QwenUpstreamError) throw retryErr;
-              console.error('[Qwen] Browser TMD retry failed:', (retryErr as Error).message);
+              options?.signal?.throwIfAborted();
+              console.error('[Qwen] Browser recovery failed:', (retryErr as Error).name);
+              throw new QwenUpstreamError('Browser recovery failed before Qwen could confirm the request.', 'BrowserRecoveryFailed', 502);
             }
-            throw new QwenUpstreamError('Qwen TMD anti-bot challenge detected. Captcha solve/header refresh was attempted but the challenge persists.', 'FAIL_SYS_USER_VALIDATE', 403);
+            throw new QwenUpstreamError('Qwen did not return a valid response after browser recovery.', 'BrowserRecoveryFailed', 502);
           }
-          handleErrorBody(peekText, browserResult.status);
+          handleErrorBody(peekText, browserResult.status, browserResult.headers['retry-after']);
         }
 
         if (browserResult.status < 400 && !browserResult.contentType.includes('text/event-stream') && !browserResult.body) {
           console.warn(`[Qwen] Browser stream returned 200 OK with empty non-stream body for ${chatId}. Retrying with fresh headers...`);
           try {
             await sleep(1000 + Math.floor(Math.random() * 1000));
-            const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
+            const { headers: freshHeaders } = await refreshCompletionHeaders();
             const retryResult = await browserStreamFetch(completionPage, url, {
               method: 'POST',
               headers: buildBrowserCompletionHeaders(freshHeaders),
@@ -1061,7 +1078,7 @@ export async function createQwenStream(
                 ...wrapLeasedStream(retryResult.stream, controller, timeoutMs, `Qwen browser stream ${chatId}`, async cancelled => {
                   let reusable = false;
                   try { await retryResult.abort(); reusable = !cancelled; }
-                  finally { await releaseCompletionPage(page, completionPage, reusable); }
+                  finally { await releaseCompletionPage(activeBasePage, completionPage, reusable); }
                 }),
                 headers: freshHeaders,
                 uiSessionId: chatId,
@@ -1082,7 +1099,7 @@ export async function createQwenStream(
         if (browserErr instanceof QwenUpstreamError || browserErr instanceof RetryableQwenStreamError) throw browserErr;
         throw new Error(`Browser stream fetch failed with active Qwen page: ${browserErr.message}`, { cause: browserErr });
       } finally {
-        if (!streamTransferred) await releaseCompletionPage(page, completionPage, false);
+        if (!streamTransferred) await releaseCompletionPage(activeBasePage, completionPage, false);
       }
     }
 
@@ -1120,7 +1137,7 @@ export async function createQwenStream(
           if (challengePage && !challengePage.isClosed() && challengePage.url().includes('chat.qwen.ai')) {
             await solveTmdChallengeIfPresent(challengePage, `chat ${chatId}`);
           }
-          const { headers: freshHeaders } = await getQwenHeaders(true, accountId);
+          const { headers: freshHeaders } = await getQwenHeaders(true, accountId, options?.signal);
           await sleep(500 + Math.floor(Math.random() * 1000));
           const retryController = new AbortController();
           const detachRetryAbort = forwardRequestAbort(options?.signal, retryController);
@@ -1157,10 +1174,12 @@ export async function createQwenStream(
           }
         } catch (retryErr) {
           if (retryErr instanceof QwenUpstreamError) throw retryErr;
-          console.error('[Qwen] TMD retry failed:', (retryErr as Error).message);
+          options?.signal?.throwIfAborted();
+          console.error('[Qwen] Browser recovery failed:', (retryErr as Error).name);
+          throw new QwenUpstreamError('Browser recovery failed before Qwen could confirm the request.', 'BrowserRecoveryFailed', 502);
         }
 
-        throw new QwenUpstreamError('Qwen TMD anti-bot challenge detected. Captcha solve/header refresh was attempted but the challenge persists.', 'FAIL_SYS_USER_VALIDATE', 403);
+        throw new QwenUpstreamError('Qwen did not return a valid response after browser recovery.', 'BrowserRecoveryFailed', 502);
       } else {
         handleErrorBody(peekText, response.status);
       }

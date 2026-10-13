@@ -32,6 +32,7 @@ const envSchema = z.object({
   ATTACHMENT_MAX_FILES: envInt(16, 1).refine(value => value <= 256),
   HEADERS_TIMEOUT: envInt(90000, 1),
   CHAT_TIMEOUT: envInt(120000, 1),
+  REQUEST_PREPARATION_TIMEOUT_MS: envInt(180000, 1).refine(value => value <= 2147483647),
   QWEN_PROVIDER_RETRY_DELAY_MS: envInt(1000, 0),
   STREAM_IDLE_TIMEOUT: envInt(180000, 1),
   CACHE_TTL: envInt(3600, 1),
@@ -123,6 +124,7 @@ export const config = {
     http: env.HTTP_TIMEOUT,
     headers: env.HEADERS_TIMEOUT,
     chat: env.CHAT_TIMEOUT,
+    preparation: env.REQUEST_PREPARATION_TIMEOUT_MS,
     streamIdle: env.STREAM_IDLE_TIMEOUT,
   },
   attachmentDownload: {

@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import crypto from 'crypto';
 import { config } from '../core/config.js';
 import { startCaptchaWatcher } from './captcha-solver.js';
+import { abortable } from '../utils/sleep.js';
 
 const streamCallbacks = new Map<string, {
   onChunk: (chunk: string) => void;
@@ -11,12 +12,12 @@ const streamCallbacks = new Map<string, {
   onBody: (body: string) => void;
 }>();
 
-const pagesWithExposed = new WeakSet<Page>();
+const pagesWithExposed = new WeakMap<Page, Promise<void>>();
 
 async function ensureStreamBridge(page: Page): Promise<void> {
-  if (pagesWithExposed.has(page)) return;
-  pagesWithExposed.add(page);
-  await page.exposeFunction('__streamRelay', (reqId: string, type: string, data: any) => {
+  const existing = pagesWithExposed.get(page);
+  if (existing) return existing;
+  const installation = Promise.resolve(page.exposeFunction('__streamRelay', (reqId: string, type: string, data: any) => {
     const cb = streamCallbacks.get(reqId);
     if (!cb) return;
     switch (type) {
@@ -26,7 +27,10 @@ async function ensureStreamBridge(page: Page): Promise<void> {
       case 'error': cb.onError(data); streamCallbacks.delete(reqId); break;
       case 'body': cb.onBody(data); streamCallbacks.delete(reqId); break;
     }
-  });
+  })).then(() => {});
+  pagesWithExposed.set(page, installation);
+  try { await installation; }
+  catch (error) { pagesWithExposed.delete(page); throw error; }
 }
 
 export async function browserFetch(
@@ -105,11 +109,22 @@ export async function browserStreamFetch(
   abort: () => Promise<void>;
 }> {
   options.signal?.throwIfAborted();
-  await ensureStreamBridge(page);
+  const installation = new AbortController();
+  const onInstallationAbort = () => installation.abort(options.signal?.reason);
+  options.signal?.addEventListener('abort', onInstallationAbort, { once: true });
+  const installationTimeout = setTimeout(() => installation.abort(new Error('Browser relay installation timed out')), options.timeoutMs || config.timeouts.chat);
+  try {
+    if (options.signal?.aborted) onInstallationAbort();
+    await abortable(ensureStreamBridge(page), installation.signal);
+    options.signal?.throwIfAborted();
+  } finally {
+    clearTimeout(installationTimeout);
+    options.signal?.removeEventListener('abort', onInstallationAbort);
+  }
   const reqId = crypto.randomUUID();
   const enc = new TextEncoder();
   const timeoutMs = options.timeoutMs || config.timeouts.chat;
-  const watcher = startCaptchaWatcher(page, timeoutMs);
+  const watcher = startCaptchaWatcher(page, timeoutMs, options.signal);
   let output: ReadableStreamDefaultController<Uint8Array>;
   let terminal = false;
   let evaluation: Promise<void> = Promise.resolve();

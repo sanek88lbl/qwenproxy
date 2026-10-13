@@ -94,6 +94,7 @@ for (const mode of ['guest', 'account'] as const) {
         unroute: async (registeredPattern: string, callback: RouteHandler) => {
           assert.equal(registeredPattern, pattern);
           assert.equal(callback, handler);
+          if (scenario.startsWith('timeout')) { cleanupStarted.resolve(); await cleanup.promise; }
         },
       } as unknown as Page;
       setGuestHeadersCache(null);

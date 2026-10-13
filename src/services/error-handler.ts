@@ -10,15 +10,17 @@ export class RetryableQwenStreamError extends Error {
 export class QwenUpstreamError extends Error {
   readonly upstreamCode: string;
   readonly upstreamStatus: number;
-  constructor(message: string, upstreamCode: string, upstreamStatus: number) {
+  readonly retryAfterMs?: number;
+  constructor(message: string, upstreamCode: string, upstreamStatus: number, retryAfterMs?: number) {
     super(message);
     this.name = 'QwenUpstreamError';
     this.upstreamCode = upstreamCode;
     this.upstreamStatus = upstreamStatus;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
-export function handleErrorBody(peekText: string, status: number): never {
+export function handleErrorBody(peekText: string, status: number, retryAfter?: string | null): never {
   try {
     const errorJson = JSON.parse(peekText);
     if (errorJson?.data?.details?.includes('chat is in progress') || errorJson?.data?.details?.includes('The chat is in progress')) {
@@ -31,7 +33,11 @@ export function handleErrorBody(peekText: string, status: number): never {
       const wait = errorJson.data?.num !== undefined ? ` Wait about ${errorJson.data.num} hour(s) before trying again.` : '';
       let errStatus = 502;
       if (code === 'RateLimited') errStatus = 429;
-      throw new QwenUpstreamError(`Qwen upstream error: ${code}: ${details}.${wait}`, code, errStatus);
+      const seconds = retryAfter?.trim() ? Number(retryAfter) : NaN;
+      const resetAt = retryAfter ? Date.parse(retryAfter) : NaN;
+      const hintedMs = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : resetAt - Date.now();
+      const retryMs = Number.isFinite(hintedMs) && hintedMs >= 0 ? Math.min(86400000, Math.max(1000, hintedMs)) : undefined;
+      throw new QwenUpstreamError(`Qwen upstream error: ${code}: ${details}.${wait}`, code, errStatus, retryMs);
     }
   } catch (e) {
     if (e instanceof QwenUpstreamError || e instanceof RetryableQwenStreamError) throw e;
