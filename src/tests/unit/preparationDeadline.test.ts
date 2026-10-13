@@ -52,8 +52,8 @@ test(`a real HTTP ${disconnect ? 'disconnect' : 'deadline'} before upstream meta
   try {
     const abort = new AbortController();
     const pending = send(abort.signal);
+    await upstreamStarted;
     if (disconnect) {
-      await upstreamStarted;
       abort.abort();
       await assert.rejects(pending);
       const deadline = Date.now() + 1000;

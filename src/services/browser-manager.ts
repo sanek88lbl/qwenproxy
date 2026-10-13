@@ -816,8 +816,10 @@ export async function closePlaywrightForAccount(accountId: string) {
     if (await hasValidAuthCookie(acctPage || null)) {
       await saveStorageState(acctContext, accountId);
     }
-    await acctContext.close();
+    try { await acctContext.close(); }
+    catch (error) { if (acctContext.browser?.()?.isConnected() !== false) throw error; }
   }
+  if (accountContexts.get(accountId) !== acctContext) return;
   accountContexts.delete(accountId);
   accountPages.delete(accountId);
   accountHeaderCaches.delete(accountId);
